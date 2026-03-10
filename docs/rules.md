@@ -109,3 +109,46 @@ JavaScript  TypeScript  Python  Rust  HTTP  HTTPS
 API  JSON  GitHub  Instagram  Google  Facebook
 React  Linux  macOS
 ```
+
+## Extending the ruleset
+
+### Adding a spelling rule
+
+Edit `assets/ruleset.json`:
+
+```json
+{
+  "from": "數據庫",
+  "to": ["資料庫"],
+  "type": "cross_strait",
+  "context": "database = 資料庫",
+  "english": "database"
+}
+```
+
+Run `scripts/check-ruleset.py --lint` to validate before opening a PR.
+
+Fields: `from` (required), `to` (required, array), `type` (required: `cross_strait` / `political_coloring` / `confusable` / `typo` / `variant`), `disabled` (optional), `context` (optional, use `@seealso` for cross-refs), `english` (optional, recommended).
+
+### Adding a case rule
+
+```json
+{
+  "term": "GraphQL",
+  "alternatives": ["graphql", "GRAPHQL", "Graphql"]
+}
+```
+
+### Runtime overrides
+
+Edit `overrides.json` in the platform config directory (`~/.config/zhtw-mcp/` on Linux, `~/Library/Application Support/zhtw-mcp/` on macOS):
+
+```json
+{
+  "schema_version": 3,
+  "spelling": [
+    {"from": "優化", "to": ["最佳化"], "type": "cross_strait", "disabled": true}
+  ],
+  "case": []
+}
+```

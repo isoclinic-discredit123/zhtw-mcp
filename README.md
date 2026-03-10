@@ -65,7 +65,7 @@ Throughout the codebase, `cn` and `tw` denote regional writing conventions, not 
 Requires stable Rust 1.91+.
 
 ```bash
-cargo build --release
+make
 ```
 
 The binary is at `target/release/zhtw-mcp`.
@@ -122,69 +122,19 @@ When running as an MCP server, you interact through natural language. The assist
 | Intent | Say | Result |
 |--------|-----|--------|
 | Lint text | *"Check this paragraph for mainland terms"* | Returns issues with location and suggestions |
-| Lint a file | *"Lint README.md for zh-TW correctness"* | Assistant reads file, passes text to `zhtw` |
 | Auto-fix | *"Fix the zh-TW issues in this document"* | Safe fixes applied, corrected text returned |
-| Aggressive fix | *"Aggressively fix all zh-TW problems"* | Context-aware fixes including ambiguous terms |
 | Quality gate | *"Reject if more than 3 zh-TW errors"* | Accept/reject verdict via `max_errors` |
 | Strict mode | *"Check this with strict MoE rules"* | Enables variant and full punctuation enforcement |
 | Markdown-aware | *"Lint this markdown, skip code blocks"* | Excludes fenced code and HTML |
-| Ignore terms | *"Check this text, but allow '程序'"* | Matching issues downgraded to Info severity |
-| Explain issues | *"Explain each issue in this text"* | English explanations with MoE references |
-| Political terms | *"Flag politically colored terms"* | Detects 祖國, 內地, etc. |
-| UI localization | *"Lint this YAML file with ui_strings profile"* | YAML-aware scan, half-width colon allowed |
-| Editorial review | *"Review and refine this zh-TW draft"* | Iterative review → fix → re-check cycles |
 
-The server also exposes two read-only resources for assistants to consult: `zh-tw://style-guide/moe` (MoE standards) and `zh-tw://dictionary/ambiguous` (cross-strait term disambiguation).
-
-## Extending the ruleset
-
-### Adding a spelling rule
-
-Edit `assets/ruleset.json`:
-
-```json
-{
-  "from": "數據庫",
-  "to": ["資料庫"],
-  "type": "cross_strait",
-  "context": "database = 資料庫",
-  "english": "database"
-}
-```
-
-Run `scripts/check-ruleset.py --lint` to validate before opening a PR.
-
-Fields: `from` (required), `to` (required, array), `type` (required: `cross_strait` / `political_coloring` / `confusable` / `typo` / `variant`), `disabled` (optional), `context` (optional, use `@seealso` for cross-refs), `english` (optional, recommended).
-
-### Adding a case rule
-
-```json
-{
-  "term": "GraphQL",
-  "alternatives": ["graphql", "GRAPHQL", "Graphql"]
-}
-```
-
-### Runtime overrides
-
-Edit `overrides.json` in the platform config directory (`~/.config/zhtw-mcp/` on Linux, `~/Library/Application Support/zhtw-mcp/` on macOS):
-
-```json
-{
-  "schema_version": 3,
-  "spelling": [
-    {"from": "優化", "to": ["最佳化"], "type": "cross_strait", "disabled": true}
-  ],
-  "case": []
-}
-```
+The server also exposes two read-only resources for assistants to consult: `zh-tw://style-guide/moe` (MoE standards) and `zh-tw://dictionary/ambiguous` (cross-strait term disambiguation). See [docs/mcp.md](docs/mcp.md) for the full prompt catalog.
 
 ## Further reading
 
 - [docs/cli.md](docs/cli.md) -- full CLI reference, config files, CI/CD integration, S2T conversion
 - [docs/mcp.md](docs/mcp.md) -- MCP tool parameters, resources, prompts, sampling, usage examples
 - [docs/internals.md](docs/internals.md) -- processing pipeline, script detection, design decisions, testing
-- [docs/rules.md](docs/rules.md) -- rule type reference (cross-strait, punctuation, variant, political, case)
+- [docs/rules.md](docs/rules.md) -- rule type reference, extending the ruleset, runtime overrides
 
 ## License
 
