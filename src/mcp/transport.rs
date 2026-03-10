@@ -15,6 +15,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Read, Write};
+use std::string::FromUtf8Error;
 use std::sync::mpsc;
 use std::thread;
 
@@ -37,6 +38,8 @@ pub(crate) enum StdinMsg {
     Line(String),
     /// A line that exceeded the maximum allowed size.
     TooLong,
+    /// A line that contains malformed UTF-8 text
+    MalformedUtf8(FromUtf8Error),
 }
 
 /// Result of a bounded line read (internal to the reader thread).
@@ -44,6 +47,7 @@ enum ReadLine {
     Line,
     Eof,
     TooLong,
+    MalformedUtf8(FromUtf8Error),
 }
 
 /// Serialize a response as JSON and write it to stdout, followed by a newline.
@@ -58,8 +62,9 @@ fn send(out: &mut impl Write, resp: &JsonRpcResponse) -> Result<()> {
 ///
 /// Uses read_until on raw bytes so that a multi-byte UTF-8 sequence
 /// straddling the MAX_LINE_BYTES boundary does not cause an InvalidData
-/// error (which would kill the reader thread). Invalid UTF-8 bytes are
-/// replaced with the Unicode replacement character U+FFFD.
+/// error (which would kill the reader thread). If the completed line
+/// contains invalid UTF-8, returns `ReadLine::MalformedUtf8` so the
+/// caller can emit a proper error response.
 fn read_bounded_line(reader: &mut impl BufRead, buf: &mut String) -> io::Result<ReadLine> {
     let mut raw: Vec<u8> = Vec::new();
     let n = reader
@@ -76,8 +81,13 @@ fn read_bounded_line(reader: &mut impl BufRead, buf: &mut String) -> io::Result<
         return Ok(ReadLine::TooLong);
     }
 
-    *buf = String::from_utf8_lossy(&raw).into_owned();
-    Ok(ReadLine::Line)
+    match String::from_utf8(raw) {
+        Ok(text) => {
+            *buf = text;
+            Ok(ReadLine::Line)
+        }
+        Err(e) => Ok(ReadLine::MalformedUtf8(e)),
+    }
 }
 
 /// Consume and discard bytes from reader until a newline or EOF.
@@ -127,6 +137,11 @@ pub fn run_stdio(server: &mut Server) -> Result<()> {
                         break;
                     }
                 }
+                Ok(ReadLine::MalformedUtf8(e)) => {
+                    if line_tx.send(StdinMsg::MalformedUtf8(e)).is_err() {
+                        break;
+                    }
+                }
                 Err(e) => {
                     log::warn!("stdin reader: {e}");
                     break;
@@ -151,6 +166,16 @@ pub fn run_stdio(server: &mut Server) -> Result<()> {
                 log::warn!("line too long, returning error");
                 let resp =
                     JsonRpcResponse::error(None, INVALID_REQUEST, "request too large".into());
+                send(&mut writer, &resp)?;
+                continue;
+            }
+            StdinMsg::MalformedUtf8(e) => {
+                log::warn!("line contains malformed UTF-8 character(s), returning error: {e}");
+                let resp = JsonRpcResponse::error(
+                    None,
+                    PARSE_ERROR,
+                    "request contains malformed UTF-8 character(s)".into(),
+                );
                 send(&mut writer, &resp)?;
                 continue;
             }

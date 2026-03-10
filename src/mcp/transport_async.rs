@@ -58,7 +58,15 @@ async fn async_stdio_loop(server: &mut Server) -> Result<()> {
             send_async(&mut stdout, &resp).await?;
             continue;
         }
-        let line = String::from_utf8_lossy(&raw_buf).trim().to_string();
+        let Ok(line) = str::from_utf8(&raw_buf).map(str::trim) else {
+            let resp = JsonRpcResponse::error(
+                None,
+                PARSE_ERROR,
+                "request contains malformed UTF-8 character(s)".into(),
+            );
+            send_async(&mut stdout, &resp).await?;
+            continue;
+        };
 
         if line.is_empty() {
             continue;
