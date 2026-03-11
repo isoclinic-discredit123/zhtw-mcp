@@ -2268,7 +2268,9 @@
       "from": "寄存器",
       "to": ["暫存器"],
       "type": "cross_strait",
-      "english": "register"
+      "context": "限 CPU/硬體語境。cash register 翻譯為「收銀機」，不適用本規則",
+      "english": "register",
+      "context_clues": ["CPU", "處理器", "指令", "記憶體", "架構", "組合語言", "assembly", "ALU", "暫存"]
     },
     {
       "from": "密鑰",
