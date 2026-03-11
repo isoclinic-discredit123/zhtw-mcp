@@ -251,6 +251,15 @@ impl Severity {
             Severity::Error => "error",
         }
     }
+
+    /// Single-letter severity for compact/grep-style output.
+    pub fn letter(self) -> &'static str {
+        match self {
+            Severity::Info => "I",
+            Severity::Warning => "W",
+            Severity::Error => "E",
+        }
+    }
 }
 
 impl RuleType {
@@ -449,6 +458,46 @@ impl IssueType {
             IssueType::Punctuation => 5,
             IssueType::Variant => 6,
         }
+    }
+
+    /// Snake_case name matching serde serialization.
+    pub fn name(self) -> &'static str {
+        match self {
+            IssueType::PoliticalColoring => "political_coloring",
+            IssueType::CrossStrait => "cross_strait",
+            IssueType::Typo => "typo",
+            IssueType::Confusable => "confusable",
+            IssueType::Case => "case",
+            IssueType::Punctuation => "punctuation",
+            IssueType::Variant => "variant",
+        }
+    }
+}
+
+impl Issue {
+    /// Compact suggestion string: first suggestion only, `+N` suffix for alternatives.
+    /// Falls back to `english` field when no suggestions exist.
+    pub fn compact_suggestion(&self) -> String {
+        if self.suggestions.is_empty() {
+            self.english.as_deref().unwrap_or("?").to_string()
+        } else if self.suggestions.len() == 1 {
+            self.suggestions[0].clone()
+        } else {
+            format!("{}+{}", self.suggestions[0], self.suggestions.len() - 1)
+        }
+    }
+
+    /// Grouping key for deduplication in compact output.
+    /// Issues with identical (found, rule_type, suggestions, severity) are collapsible.
+    /// Uses full suggestion list (joined) rather than compact display form to avoid
+    /// merging issues with different alternative sets.
+    pub fn compact_dedup_key(&self) -> (&str, &'static str, String, &'static str) {
+        (
+            &self.found,
+            self.rule_type.name(),
+            self.suggestions.join("|"),
+            self.severity.letter(),
+        )
     }
 }
 

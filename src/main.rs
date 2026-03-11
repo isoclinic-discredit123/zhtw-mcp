@@ -53,7 +53,7 @@ fn main() -> Result<()> {
     //   zhtw-mcp --overrides <path>             — custom overrides JSON path
     //   zhtw-mcp --suppressions <path>          — custom suppressions JSON path
     //   zhtw-mcp --pack <name>                  — activate a rule pack (repeatable)
-    //   zhtw-mcp lint <file|--> [--format json]  — lint file(s) or stdin
+    //   zhtw-mcp lint <file|--> [--format json|compact]  — lint file(s) or stdin
     //                           [--max-errors N]
     //                           [--profile P]
     //                           [--content-type plain|markdown|yaml]
@@ -117,8 +117,9 @@ fn main() -> Result<()> {
                                 "json" => LintFormat::Json,
                                 "human" => LintFormat::Human,
                                 "sarif" => LintFormat::Sarif,
+                                "compact" => LintFormat::Compact,
                                 _ => anyhow::bail!(
-                                    "unknown format: {fmt} (expected 'json', 'human', or 'sarif')"
+                                    "unknown format: {fmt} (expected 'json', 'human', 'sarif', or 'compact')"
                                 ),
                             };
                         }
@@ -412,6 +413,7 @@ enum LintFormat {
     Human,
     Json,
     Sarif,
+    Compact,
 }
 
 struct LintBatchParams<'a> {
@@ -755,6 +757,94 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                         report_issues.len(),
                         c.reset
                     );
+                }
+            }
+            LintFormat::Compact => {
+                // Grep-style one-line-per-issue, deduplicated for LLM token efficiency.
+                // Format: file:line:col:S:rule:from→to
+                // Uses shared Issue::compact_dedup_key() / Severity::letter().
+                use std::collections::HashMap;
+
+                // Group by dedup key, preserving first-occurrence order via index.
+                type CompactKey<'a> = (&'a str, &'a str, String, &'a str);
+                struct CompactGroup {
+                    first_loc: (usize, usize),
+                    locs: Vec<(usize, usize)>,
+                    context: Option<String>,
+                    english: Option<String>,
+                }
+                let mut groups: HashMap<CompactKey<'_>, CompactGroup> = HashMap::new();
+                let mut order: Vec<CompactKey<'_>> = Vec::new();
+                for issue in &report_issues {
+                    let key = issue.compact_dedup_key();
+                    let group = groups.entry(key.clone()).or_insert_with(|| {
+                        order.push(key);
+                        CompactGroup {
+                            first_loc: (issue.line, issue.col),
+                            locs: Vec::new(),
+                            context: issue.context.clone(),
+                            english: issue.english.clone(),
+                        }
+                    });
+                    group.locs.push((issue.line, issue.col));
+                }
+
+                let file_prefix = if file_arg == "--" {
+                    String::new()
+                } else {
+                    let display_path = std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| {
+                            Path::new(file_arg)
+                                .strip_prefix(&cwd)
+                                .ok()
+                                .map(|p| p.to_string_lossy().into_owned())
+                        })
+                        .unwrap_or_else(|| file_arg.clone());
+                    format!("{display_path}:")
+                };
+
+                // Emit in source order (first occurrence of each group).
+                order.sort_by_key(|k| groups[k].first_loc);
+                for key in &order {
+                    let (found, rt, sug_key, sev) = key;
+                    let group = &groups[key];
+                    // Render suggestion: first entry + count of alternatives.
+                    let parts: Vec<&str> = sug_key.split('|').collect();
+                    let display_sug = if parts.len() <= 1 {
+                        parts.first().copied().unwrap_or("?").to_string()
+                    } else {
+                        format!("{}+{}", parts[0], parts.len() - 1)
+                    };
+                    if group.locs.len() == 1 {
+                        print!(
+                            "{file_prefix}{}:{}:{sev}:{rt}:{found}\u{2192}{display_sug}",
+                            group.locs[0].0, group.locs[0].1
+                        );
+                    } else {
+                        let rest: Vec<String> = group.locs[1..]
+                            .iter()
+                            .map(|(l, c)| format!("{l}:{c}"))
+                            .collect();
+                        print!(
+                            "{file_prefix}{}:{}:{sev}:{rt}:{found}\u{2192}{display_sug} (\u{00d7}{} also at {})",
+                            group.first_loc.0, group.first_loc.1,
+                            group.locs.len(),
+                            rest.join(",")
+                        );
+                    }
+                    // --explain: append context/english on the same line.
+                    // Sanitize newlines to preserve one-line-per-issue format.
+                    if params.explain {
+                        if let Some(ctx) = &group.context {
+                            let sanitized = ctx.replace('\n', " ");
+                            print!(" [{sanitized}]");
+                        }
+                        if let Some(eng) = &group.english {
+                            print!(" ({eng})");
+                        }
+                    }
+                    println!();
                 }
             }
             LintFormat::Sarif => {

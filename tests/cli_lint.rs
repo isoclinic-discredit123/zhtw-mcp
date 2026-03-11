@@ -519,3 +519,127 @@ fn cli_lint_human_format_multi_file() {
         "multi-file human format should include filename prefix"
     );
 }
+
+// -- Compact format tests (33.1) -------------------------------------------
+
+#[test]
+fn cli_lint_compact_format_single_issue() {
+    // Single issue: file:line:col:S:rule:from→to
+    let output = run_lint_stdin(&["--format", "compact"], "這個軟件很好用");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should have single-letter severity and arrow.
+    assert!(
+        stdout.contains(":W:") || stdout.contains(":E:"),
+        "compact should use single-letter severity: {stdout}"
+    );
+    assert!(
+        stdout.contains('\u{2192}'),
+        "compact should use → arrow: {stdout}"
+    );
+    // No ANSI escape codes.
+    assert!(
+        !stdout.contains("\x1b["),
+        "compact must not contain ANSI codes: {stdout}"
+    );
+}
+
+#[test]
+fn cli_lint_compact_format_clean_is_empty() {
+    let output = run_lint_stdin(&["--format", "compact"], "這是正確的繁體中文。");
+    assert!(output.status.success(), "clean compact lint should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.is_empty(),
+        "compact on clean text should emit nothing"
+    );
+}
+
+#[test]
+fn cli_lint_compact_format_dedup() {
+    // 5 identical 視頻 issues should deduplicate to one line with ×N.
+    let output = run_lint_stdin(&["--format", "compact"], "視頻、視頻、視頻、視頻、視頻");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\u{00d7}") || stdout.contains("×"),
+        "repeated issues should deduplicate with × marker: {stdout}"
+    );
+    // Should be a single line (deduped).
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "5 identical issues should collapse to 1 line"
+    );
+}
+
+#[test]
+fn cli_lint_compact_format_suggestion_plus_n() {
+    // 視頻 has 3 suggestions: 影片, 影音, 視訊 → compact shows 影片+2
+    let output = run_lint_stdin(&["--format", "compact"], "這個視頻");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("+2"),
+        "compact should show +N for alternatives: {stdout}"
+    );
+}
+
+#[test]
+fn cli_lint_compact_format_no_file_prefix_stdin() {
+    // Stdin should omit file prefix.
+    let output = run_lint_stdin(&["--format", "compact"], "這個軟件");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.is_empty(),
+        "expected compact output for input containing an issue"
+    );
+    // Line should start with a digit (line number), not a path.
+    for line in stdout.lines() {
+        assert!(
+            line.starts_with(|c: char| c.is_ascii_digit()),
+            "stdin compact should start with line number: {line}"
+        );
+    }
+}
+
+#[test]
+fn cli_lint_compact_format_includes_path_single_file() {
+    // Single-file compact output must include the filename for grep compatibility.
+    // Run with current_dir set to the tempdir so strip_prefix relativization is exercised.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.txt");
+    std::fs::write(&path, "這個軟件").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zhtw-mcp"))
+        .args(["lint", "test.txt", "--format", "compact"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.is_empty(),
+        "expected compact output for input containing an issue"
+    );
+    for line in stdout.lines() {
+        assert!(
+            line.starts_with("test.txt:"),
+            "single-file compact must start with filename: {line}"
+        );
+    }
+}
+
+#[test]
+fn cli_lint_compact_token_reduction_vs_human() {
+    // Gate: ≥40% token reduction vs human default.
+    // Approximate tokens by character count (reasonable proxy for CJK+ASCII mix).
+    let input = "這個軟件使用了視頻功能，視頻品質不錯。並行計算很快。";
+    let human_output = run_lint_stdin(&["--format", "human"], input);
+    let compact_output = run_lint_stdin(&["--format", "compact"], input);
+    let human_len = String::from_utf8_lossy(&human_output.stderr).len();
+    let compact_len = String::from_utf8_lossy(&compact_output.stdout).len();
+    assert!(human_len > 0, "human output should be non-empty");
+    assert!(compact_len > 0, "compact output should be non-empty");
+    let reduction = 1.0 - (compact_len as f64 / human_len as f64);
+    assert!(
+        reduction >= 0.40,
+        "compact should achieve ≥40% reduction vs human: human={human_len} compact={compact_len} reduction={reduction:.2}"
+    );
+}

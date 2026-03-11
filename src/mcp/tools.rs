@@ -44,6 +44,8 @@ pub struct Server {
     client_capabilities: ClientCapabilities,
     /// Whether the client has completed the initialize handshake.
     initialized: bool,
+    /// Client name from initialize handshake, used for auto-compact detection.
+    client_name: Option<String>,
     /// Singleton translation cache, opened once at server start (32.3).
     #[cfg(feature = "translate")]
     translation_cache: Option<TranslationCache>,
@@ -78,6 +80,7 @@ impl Server {
             ruleset_hash,
             client_capabilities: ClientCapabilities::default(),
             initialized: false,
+            client_name: None,
             #[cfg(feature = "translate")]
             translation_cache,
         })
@@ -201,6 +204,7 @@ impl Server {
 
         // Store parsed client capabilities for later use (e.g. sampling).
         self.client_capabilities = ClientCapabilities::from(&params.capabilities);
+        self.client_name = params.client_info.map(|ci| ci.name);
         self.initialized = true;
 
         let result = InitializeResult {
@@ -303,10 +307,11 @@ impl Server {
         let max_warnings = args.get("max_warnings").and_then(|v| v.as_u64());
         let ignore_terms = parse_ignore_terms(args);
         let explain = parse_explain(args);
-        let output_mode = match parse_output_mode(args) {
-            Ok(m) => m,
-            Err(r) => return r,
-        };
+        let output_mode =
+            match parse_output_mode(args, default_output_mode(self.client_name.as_deref())) {
+                Ok(m) => m,
+                Err(r) => return r,
+            };
         #[cfg(feature = "translate")]
         let confirm = parse_confirm(args);
 
@@ -678,14 +683,61 @@ enum OutputMode {
 }
 
 /// Parse the optional "output" mode from tool arguments.
-/// Returns an error for unrecognized values instead of silently defaulting.
-fn parse_output_mode(args: &Value) -> Result<OutputMode, CallToolResult> {
+/// When no explicit value is given, uses the provided default (which may
+/// be auto-detected from the client identity).
+fn parse_output_mode(args: &Value, default: OutputMode) -> Result<OutputMode, CallToolResult> {
     match args.get("output").and_then(|v| v.as_str()) {
         Some("compact") => Ok(OutputMode::Compact),
-        Some("full") | None => Ok(OutputMode::Full),
+        Some("full") => Ok(OutputMode::Full),
+        None => Ok(default),
         Some(other) => Err(CallToolResult::error(format!(
             "invalid 'output': '{other}' (expected 'full' or 'compact')"
         ))),
+    }
+}
+
+/// Known AI agent/CLI client names that benefit from compact output.
+/// Matched as exact full-name against the lowercased `clientInfo.name`.
+/// Only programmatic agents/CLIs — NOT desktop GUI apps like "Claude Desktop".
+const AI_AGENT_CLIENTS: &[&str] = &[
+    "claude-code",
+    "claude code",
+    "cursor",
+    "cline",
+    "continue",
+    "zed",
+    "windsurf",
+    "copilot",
+    "aider",
+    "cody",
+    "roo",
+    "roo-code",
+    "roo code",
+];
+
+/// Determine default output mode from client identity.
+/// Uses exact full-name match only to avoid false positives on clients
+/// like "Claude Desktop" that happen to share a token with an agent name.
+/// Strips trailing version suffixes (`/1.0`, ` 1.0`) before matching,
+/// since some clients embed version info in the name field.
+fn default_output_mode(client_name: Option<&str>) -> OutputMode {
+    match client_name {
+        Some(name) => {
+            let lower = name.to_ascii_lowercase();
+            // Strip trailing version suffix: "Cursor/0.1.0" → "cursor", "cline 1.2" → "cline"
+            let base = lower
+                .split('/')
+                .next()
+                .unwrap_or(&lower)
+                .trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
+                .trim();
+            if AI_AGENT_CLIENTS.contains(&base) {
+                OutputMode::Compact
+            } else {
+                OutputMode::Full
+            }
+        }
+        None => OutputMode::Full,
     }
 }
 
@@ -997,25 +1049,23 @@ fn build_issues_full(issues: &[Issue], explain: bool) -> Value {
 fn build_issues_compact(issues: &[Issue], explain: bool) -> Value {
     use std::collections::BTreeMap;
 
-    // Key: (found, rule_type_str, suggestions_joined, severity)
+    // Key: (found, rule_type, suggestions_joined, severity)
     // Include severity so that sampling can produce mixed-severity occurrences
     // of the same term without silently inheriting the first occurrence's level.
+    // Uses shared IssueType::name() and Severity::name() from ruleset.rs.
     // We use BTreeMap for deterministic ordering.
-    let mut groups: BTreeMap<(String, String, String, String), CompactGroup> = BTreeMap::new();
+    let mut groups: BTreeMap<(&str, &str, String, &str), CompactGroup> = BTreeMap::new();
 
     for issue in issues {
-        let rt = serde_json::to_string(&issue.rule_type)
-            .unwrap_or_default()
-            .trim_matches('"')
-            .to_string();
+        let rt = issue.rule_type.name();
         let sug_key = issue.suggestions.join("|");
-        let sev_key = issue.severity.name().to_string();
-        let key = (issue.found.clone(), rt.clone(), sug_key, sev_key);
+        let sev_key = issue.severity.name();
+        let key = (issue.found.as_str(), rt, sug_key, sev_key);
 
         let group = groups.entry(key).or_insert_with(|| CompactGroup {
             found: issue.found.clone(),
             suggestions: issue.suggestions.clone(),
-            rule_type: rt,
+            rule_type: rt.to_string(),
             severity: issue.severity.name().to_string(),
             context: issue.context.clone(),
             english: issue.english.clone(),

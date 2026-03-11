@@ -551,9 +551,267 @@ fn e2e_initialize_and_tools_list() {
         "unknown content_type should be rejected: {error_text}"
     );
 
+    // -- E2E: output: "compact" — deduplicated issues, no text/trace fields --
+
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 30,
+            "params": {
+                "name": "zhtw",
+                "arguments": {
+                    "text": "視頻和視頻都是視頻",
+                    "output": "compact"
+                }
+            }
+        }),
+    );
+    assert_eq!(resp["id"], 30);
+    let content_text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let output: Value = serde_json::from_str(content_text).unwrap();
+    assert_eq!(output["accepted"], true);
+    // Compact omits text field when no fixes applied.
+    assert!(
+        output.get("text").is_none(),
+        "compact without fixes should omit text"
+    );
+    // Compact omits trace field.
+    assert!(output.get("trace").is_none(), "compact should omit trace");
+    // Issues should be deduplicated: 3x 視頻 collapses to 1 group.
+    let issues = output["issues"].as_array().unwrap();
+    let video_groups: Vec<_> = issues.iter().filter(|i| i["found"] == "視頻").collect();
+    assert_eq!(
+        video_groups.len(),
+        1,
+        "compact should deduplicate identical issues into one group"
+    );
+    assert_eq!(
+        video_groups[0]["count"].as_u64().unwrap(),
+        3,
+        "deduplicated group should have count=3"
+    );
+    // Locations array should have 3 entries.
+    assert_eq!(
+        video_groups[0]["locations"].as_array().unwrap().len(),
+        3,
+        "locations should list all 3 occurrences"
+    );
+    // Compact uses shared IssueType::name() for rule_type field.
+    assert_eq!(
+        video_groups[0]["rule_type"], "cross_strait",
+        "rule_type should use snake_case name"
+    );
+
+    // -- E2E: output: "compact" with fix_mode — text included when fixes applied --
+
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 31,
+            "params": {
+                "name": "zhtw",
+                "arguments": {
+                    "text": "這個軟件很好",
+                    "output": "compact",
+                    "fix_mode": "safe"
+                }
+            }
+        }),
+    );
+    assert_eq!(resp["id"], 31);
+    let content_text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let output: Value = serde_json::from_str(content_text).unwrap();
+    assert!(output["applied_fixes"].as_u64().unwrap() > 0);
+    // Compact includes text when fixes were applied.
+    assert!(
+        output.get("text").is_some(),
+        "compact with fixes should include text"
+    );
+    assert!(
+        output["text"].as_str().unwrap().contains("軟體"),
+        "fixed text should contain 軟體"
+    );
+
+    // -- E2E: output: "compact" token reduction vs full --
+
+    let test_text = "軟件用了視頻功能，視頻品質好。並行計算很快。";
+    let resp_full = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 32,
+            "params": {
+                "name": "zhtw",
+                "arguments": { "text": test_text, "output": "full" }
+            }
+        }),
+    );
+    let resp_compact = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 33,
+            "params": {
+                "name": "zhtw",
+                "arguments": { "text": test_text, "output": "compact" }
+            }
+        }),
+    );
+    let full_len = resp_full["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .len();
+    let compact_len = resp_compact["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .len();
+    let reduction = 1.0 - (compact_len as f64 / full_len as f64);
+    assert!(
+        reduction >= 0.30,
+        "MCP compact should achieve ≥30% reduction vs full: full={full_len} compact={compact_len} reduction={reduction:.2}"
+    );
+
     // Close stdin to let the child exit gracefully.
     drop(stdin);
     let status = child.wait().unwrap();
     assert!(status.success());
     // tmp_dir auto-cleaned on drop
+}
+
+/// AI agent clients (e.g. claude-code) should auto-default to compact output
+/// without explicitly passing `"output": "compact"`.
+#[test]
+fn e2e_auto_compact_for_ai_clients() {
+    let bin = binary_path();
+    let tmp_dir = tempfile::tempdir().expect("create temp dir");
+    let overrides_path = tmp_dir.path().join("overrides.json");
+    let suppressions_path = tmp_dir.path().join("suppressions.json");
+
+    let mut child = Command::new(&bin)
+        .args([
+            "--overrides",
+            overrides_path.to_str().unwrap(),
+            "--suppressions",
+            suppressions_path.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn zhtw-mcp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    // Initialize with clientInfo.name = "claude-code" (AI agent).
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "claude-code", "version": "1.0" }
+            }
+        }),
+    );
+    assert_eq!(resp["id"], 1);
+
+    send_notification(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }),
+    );
+
+    // Call zhtw WITHOUT explicit "output" field — should auto-compact.
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 2,
+            "params": {
+                "name": "zhtw",
+                "arguments": {
+                    "text": "視頻和視頻都是視頻"
+                }
+            }
+        }),
+    );
+    assert_eq!(resp["id"], 2);
+    let content_text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let output: Value = serde_json::from_str(content_text).unwrap();
+
+    // Compact signature: no "text" field (no fixes applied), no "trace" field.
+    assert!(
+        output.get("text").is_none(),
+        "auto-compact for AI client should omit text: {output}"
+    );
+    assert!(
+        output.get("trace").is_none(),
+        "auto-compact for AI client should omit trace: {output}"
+    );
+    // Issues should be deduplicated (compact grouping).
+    let issues = output["issues"].as_array().unwrap();
+    let video_groups: Vec<_> = issues.iter().filter(|i| i["found"] == "視頻").collect();
+    assert_eq!(
+        video_groups.len(),
+        1,
+        "auto-compact should deduplicate issues"
+    );
+    assert_eq!(
+        video_groups[0]["count"].as_u64().unwrap(),
+        3,
+        "should show count=3 for 3 occurrences"
+    );
+
+    // Explicit "output": "full" should override auto-compact.
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 3,
+            "params": {
+                "name": "zhtw",
+                "arguments": {
+                    "text": "這個軟件",
+                    "output": "full"
+                }
+            }
+        }),
+    );
+    assert_eq!(resp["id"], 3);
+    let content_text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let output: Value = serde_json::from_str(content_text).unwrap();
+    // Full mode: text and trace fields present.
+    assert!(
+        output.get("text").is_some(),
+        "explicit full should include text"
+    );
+    assert!(
+        output.get("trace").is_some(),
+        "explicit full should include trace"
+    );
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
 }
