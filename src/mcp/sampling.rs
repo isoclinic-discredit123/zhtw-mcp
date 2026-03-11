@@ -287,6 +287,10 @@ impl<'a> SamplingBridge<'a> {
                     self.spillover.push(StdinMsg::TooLong);
                     continue;
                 }
+                StdinMsg::MalformedUtf8(e) => {
+                    self.spillover.push(StdinMsg::MalformedUtf8(e));
+                    continue;
+                }
             };
 
             let resp: Value = match serde_json::from_str(&line) {
