@@ -386,6 +386,12 @@ pub struct Issue {
     /// segmenter to decide whether an ambiguous term should be corrected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_clues: Option<Vec<String>>,
+    /// Calibration result from translation verification.
+    /// `Some(true)`: anchor found in translation (confirmed).
+    /// `Some(false)`: anchor absent in translation (unconfirmed).
+    /// `None`: calibration not attempted or API failure (no signal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_match: Option<bool>,
 }
 
 impl Issue {
@@ -411,6 +417,7 @@ impl Issue {
             context: None,
             english: None,
             context_clues: None,
+            anchor_match: None,
         }
     }
 

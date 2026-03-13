@@ -20,9 +20,7 @@ use crate::engine::excluded::ByteRange;
 use crate::engine::s2t::S2TConverter;
 use crate::engine::scan::{build_exclusions_for_content_type, ContentType, Scanner};
 #[cfg(feature = "translate")]
-use crate::engine::translate::{
-    confirm_issues, confirm_issues_with_sampling, ConfirmConfig, ConfirmResult, TranslationCache,
-};
+use crate::engine::translate::calibrate_issues;
 use crate::engine::zhtype::{detect_chinese_type, ChineseType};
 use crate::fixer::{
     apply_fixes_with_context, remap_to_post_fix, suppress_convergent_issues, FixMode,
@@ -46,9 +44,6 @@ pub struct Server {
     initialized: bool,
     /// Client name from initialize handshake, used for auto-compact detection.
     client_name: Option<String>,
-    /// Singleton translation cache, opened once at server start (32.3).
-    #[cfg(feature = "translate")]
-    translation_cache: Option<TranslationCache>,
 }
 
 impl Server {
@@ -64,15 +59,6 @@ impl Server {
         let (scanner, ruleset_hash) =
             Self::build_scanner(&base_ruleset, &store, &pack_store, &active_packs)?;
 
-        #[cfg(feature = "translate")]
-        let translation_cache = match TranslationCache::open() {
-            Ok(c) => Some(c),
-            Err(e) => {
-                log::warn!("translation cache open failed, proceeding without: {e}");
-                None
-            }
-        };
-
         Ok(Self {
             scanner,
             s2t: S2TConverter::new(),
@@ -81,8 +67,6 @@ impl Server {
             client_capabilities: ClientCapabilities::default(),
             initialized: false,
             client_name: None,
-            #[cfg(feature = "translate")]
-            translation_cache,
         })
     }
 
@@ -313,7 +297,7 @@ impl Server {
                 Err(r) => return r,
             };
         #[cfg(feature = "translate")]
-        let confirm = parse_confirm(args);
+        let verify = parse_verify(args);
 
         let stance_name = stance.unwrap_or(PoliticalStance::RocCentric).name();
 
@@ -332,20 +316,19 @@ impl Server {
                 if let Some(st) = stance {
                     filter_by_stance(&mut issues, st);
                 }
+                // Calibrate issues via Google Translate anchor matching.
+                #[cfg(feature = "translate")]
+                let calibrate_result = if verify {
+                    Some(calibrate_issues(text, &mut issues))
+                } else {
+                    None
+                };
+
                 if let Some(b) = bridge.as_mut() {
-                    refine_issues_with_sampling(&mut issues, b, text);
+                    refine_issues_with_sampling(&mut issues, b, text, 0.3, 0.8);
                 }
                 self.apply_suppressions(&mut issues);
                 apply_ignore_terms(&mut issues, &ignore_terms);
-
-                #[cfg(feature = "translate")]
-                let confirm_result = run_anchor_confirm(
-                    &mut issues,
-                    text,
-                    bridge,
-                    self.translation_cache.as_ref(),
-                    confirm,
-                );
 
                 let trace =
                     Trace::new("zhtw", &self.ruleset_hash, text).with_issue_count(issues.len());
@@ -365,7 +348,7 @@ impl Server {
                     output_mode,
                     has_fixes: s2t_converted.is_some(),
                     #[cfg(feature = "translate")]
-                    confirm_result,
+                    calibrate_result,
                 })
             }
 
@@ -388,30 +371,46 @@ impl Server {
                     filter_by_stance(&mut issues, st);
                 }
 
-                // Snapshot severities before sampling to detect downgrades.
-                let pre_severities: Vec<Severity> = if bridge.is_some() {
-                    issues.iter().map(|i| i.severity).collect()
+                // Calibrate issues via Google Translate anchor matching.
+                #[cfg(feature = "translate")]
+                let calibrate_result = if verify {
+                    Some(calibrate_issues(text, &mut issues))
                 } else {
-                    Vec::new()
+                    None
                 };
 
                 if let Some(b) = bridge.as_mut() {
-                    refine_issues_with_sampling(&mut issues, b, text);
+                    refine_issues_with_sampling(&mut issues, b, text, 0.3, 0.8);
                 }
-
-                // Track terms downgraded to Info by sampling, keyed by (text, offset)
-                // so re-scan can match by position, not just term text.
-                let sampling_downgraded: Vec<(String, usize)> = issues
-                    .iter()
-                    .zip(pre_severities.iter())
-                    .filter(|(issue, &orig)| {
-                        orig != Severity::Info && issue.severity == Severity::Info
-                    })
-                    .map(|(issue, _)| (issue.found.clone(), issue.offset))
-                    .collect();
 
                 self.apply_suppressions(&mut issues);
                 apply_ignore_terms(&mut issues, &ignore_terms);
+
+                // Snapshot AFTER suppressions so restored severity reflects final state.
+                struct PreservedState {
+                    term: String,
+                    orig_offset: usize,
+                    length: usize,
+                    english: Option<String>,
+                    severity: Severity,
+                    anchor_match: Option<bool>,
+                    context: Option<String>,
+                    suggestions: Vec<String>,
+                }
+
+                let preserved_states: Vec<PreservedState> = issues
+                    .iter()
+                    .map(|i| PreservedState {
+                        term: i.found.clone(),
+                        orig_offset: i.offset,
+                        length: i.length,
+                        english: i.english.clone(),
+                        severity: i.severity,
+                        anchor_match: i.anchor_match,
+                        context: i.context.clone(),
+                        suggestions: i.suggestions.clone(),
+                    })
+                    .collect();
 
                 let excluded_pairs = to_offset_pairs(&excluded);
                 let fix_result = apply_fixes_with_context(
@@ -433,29 +432,26 @@ impl Server {
                 self.apply_suppressions(&mut remaining_issues);
                 apply_ignore_terms(&mut remaining_issues, &ignore_terms);
 
-                // Re-apply sampling downgrades using exact offset remapping.
+                // Re-apply preserved states using identity-safe matching:
+                // term + remapped offset + length + english must all match.
                 for issue in &mut remaining_issues {
-                    let matched = sampling_downgraded.iter().any(|(term, orig_offset)| {
-                        let expected = remap_to_post_fix(*orig_offset, &fix_result.applied_fixes);
-                        term == &issue.found && issue.offset == expected
-                    });
-                    if matched {
-                        issue.severity = Severity::Info;
+                    if let Some(state) = preserved_states.iter().find(|s| {
+                        let expected = remap_to_post_fix(s.orig_offset, &fix_result.applied_fixes);
+                        s.term == issue.found
+                            && issue.offset == expected
+                            && s.length == issue.length
+                            && s.english == issue.english
+                    }) {
+                        issue.severity = state.severity;
+                        issue.anchor_match = state.anchor_match;
+                        issue.context = state.context.clone();
+                        issue.suggestions = state.suggestions.clone();
                     }
                 }
 
                 // Suppress convergent-chain noise: remove re-scan issues
                 // whose offset falls within a byte range written by the fixer.
                 suppress_convergent_issues(&mut remaining_issues, &fix_result.applied_fixes);
-
-                #[cfg(feature = "translate")]
-                let confirm_result = run_anchor_confirm(
-                    &mut remaining_issues,
-                    &fix_result.text,
-                    bridge,
-                    self.translation_cache.as_ref(),
-                    confirm,
-                );
 
                 let trace = Trace::new("zhtw", &self.ruleset_hash, text)
                     .with_issue_count(remaining_issues.len())
@@ -476,7 +472,7 @@ impl Server {
                     output_mode,
                     has_fixes: fix_result.applied > 0 || s2t_converted.is_some(),
                     #[cfg(feature = "translate")]
-                    confirm_result,
+                    calibrate_result,
                 })
             }
         }
@@ -543,32 +539,6 @@ impl Server {
             ),
         }
     }
-}
-
-/// Run anchor-confirmation on issues, preferring sampling bridge over Google
-/// Translate cache. Returns None if confirm is disabled.
-#[cfg(feature = "translate")]
-fn run_anchor_confirm(
-    issues: &mut [Issue],
-    text: &str,
-    mut bridge: Option<&mut SamplingBridge<'_>>,
-    cache: Option<&TranslationCache>,
-    confirm: bool,
-) -> Option<ConfirmResult> {
-    if !confirm {
-        return None;
-    }
-    let config = ConfirmConfig::default();
-    if let Some(b) = bridge.as_mut() {
-        if b.has_budget() {
-            let r = confirm_issues_with_sampling(issues, text, b, &config);
-            if r.transport_failed {
-                return Some(confirm_issues(issues, text, &config, cache));
-            }
-            return Some(r);
-        }
-    }
-    Some(confirm_issues(issues, text, &config, cache))
 }
 
 /// Serialize result to JSON and wrap in a success response, or return an
@@ -741,10 +711,10 @@ fn default_output_mode(client_name: Option<&str>) -> OutputMode {
     }
 }
 
-/// Parse the optional "confirm" flag from tool arguments.
+/// Parse the optional "verify" flag from tool arguments.
 #[cfg(feature = "translate")]
-fn parse_confirm(args: &Value) -> bool {
-    args.get("confirm")
+fn parse_verify(args: &Value) -> bool {
+    args.get("verify")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
 }
@@ -904,7 +874,7 @@ struct CheckOutputParams<'a> {
     output_mode: OutputMode,
     has_fixes: bool,
     #[cfg(feature = "translate")]
-    confirm_result: Option<ConfirmResult>,
+    calibrate_result: Option<crate::engine::translate::CalibrateResult>,
 }
 
 /// Build the unified zhtw JSON response and wrap it in a CallToolResult.
@@ -983,17 +953,16 @@ fn build_check_output(params: &CheckOutputParams<'_>) -> CallToolResult {
         }
     };
 
-    // Append confirm stats when anchor-confirmation was used.
+    // Append calibration stats when anchor-verification was used.
     #[cfg(feature = "translate")]
     let output = {
         let mut out = output;
-        if let Some(ref cr) = params.confirm_result {
-            out["confirm"] = json!({
-                "confirmed": cr.confirmed,
-                "unconfirmed": cr.unconfirmed,
-                "unknown": cr.unknown,
-                "api_calls": cr.api_calls,
-                "cache_hits": cr.cache_hits,
+        if let Some(ref cr) = params.calibrate_result {
+            out["verify"] = json!({
+                "api_ok": cr.api_ok,
+                "matched": cr.matched,
+                "unmatched": cr.unmatched,
+                "no_english": cr.no_english,
             });
         }
         out
@@ -1023,6 +992,15 @@ fn build_issues_full(issues: &[Issue], explain: bool) -> Value {
                 Ok(mut obj) => {
                     if let Some(explanation) = build_explanation(issue) {
                         obj["explanation"] = Value::String(explanation);
+                    }
+                    // Anchor provenance: structured object for LLM reasoning chains.
+                    if issue.anchor_match.is_some() {
+                        let mut prov = serde_json::Map::new();
+                        if let Some(eng) = &issue.english {
+                            prov.insert("anchor_en".into(), json!(eng));
+                        }
+                        prov.insert("anchor_match".into(), json!(issue.anchor_match));
+                        obj["anchor_provenance"] = Value::Object(prov);
                     }
                     Some(obj)
                 }
@@ -1074,6 +1052,16 @@ fn build_issues_compact(issues: &[Issue], explain: bool) -> Value {
             } else {
                 None
             },
+            anchor_provenance: if explain && issue.anchor_match.is_some() {
+                let mut prov = serde_json::Map::new();
+                if let Some(eng) = &issue.english {
+                    prov.insert("anchor_en".into(), json!(eng));
+                }
+                prov.insert("anchor_match".into(), json!(issue.anchor_match));
+                Some(Value::Object(prov))
+            } else {
+                None
+            },
             count: 0,
             locations: Vec::new(),
         });
@@ -1103,6 +1091,9 @@ fn build_issues_compact(issues: &[Issue], explain: bool) -> Value {
             if let Some(expl) = &g.explanation {
                 obj["explanation"] = Value::String(expl.clone());
             }
+            if let Some(prov) = &g.anchor_provenance {
+                obj["anchor_provenance"] = prov.clone();
+            }
             obj
         })
         .collect();
@@ -1119,6 +1110,7 @@ struct CompactGroup {
     context: Option<String>,
     english: Option<String>,
     explanation: Option<String>,
+    anchor_provenance: Option<Value>,
     count: usize,
     locations: Vec<(usize, usize)>,
 }
@@ -1128,7 +1120,7 @@ struct CompactGroup {
 fn tool_definitions() -> Vec<ToolDef> {
     vec![ToolDef {
         name: "zhtw".into(),
-        description: "Lint/fix/gate zh-TW text. Auto-converts Simplified Chinese to Traditional before applying rules.".into(),
+        description: "Lint/fix/gate zh-TW text. Auto-converts Simplified Chinese to Traditional before applying rules. Use verify=true to calibrate issues via Google Translate anchor matching.".into(),
         input_schema: {
             let mut props = serde_json::Map::new();
             props.insert("text".into(), json!({ "type": "string" }));
@@ -1156,9 +1148,9 @@ fn tool_definitions() -> Vec<ToolDef> {
             }));
             props.insert("explain".into(), json!({ "type": "boolean" }));
             #[cfg(feature = "translate")]
-            props.insert("confirm".into(), json!({
+            props.insert("verify".into(), json!({
                 "type": "boolean",
-                "description": "Anchor-confirm issues via Google Translate"
+                "description": "Anchor-verify issues via Google Translate"
             }));
             props.insert("output".into(), json!({
                 "type": "string",

@@ -15,7 +15,7 @@ include = ["src/**/*", "assets/ruleset.json", "Cargo.toml", "LICENSE", "README.m
 [features]
 default = ["translate"]
 async-transport = ["dep:tokio"]
-translate = ["dep:ureq", "dep:urlencoding", "dep:sled", "dep:postcard"]
+translate = ["dep:ureq", "dep:urlencoding"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -35,8 +35,6 @@ toml = "0.8"
 tokio = { version = "1", features = ["rt", "io-util", "time", "sync", "macros", "io-std"], optional = true }
 ureq = { version = "3", optional = true }
 urlencoding = { version = "2", optional = true }
-sled = { version = "0.34", optional = true }
-postcard = { version = "1", features = ["alloc"], optional = true }
 rustc-hash = "2.1.1"
 fs2 = "0.4"
 

@@ -815,3 +815,119 @@ fn e2e_auto_compact_for_ai_clients() {
     let status = child.wait().unwrap();
     assert!(status.success());
 }
+
+/// Verify explain mode includes explanation annotations and deterministic results.
+#[test]
+fn e2e_explain_mode_and_determinism() {
+    let bin = binary_path();
+    if !bin.exists() {
+        panic!("binary not found at {:?}; run `cargo build` first", bin);
+    }
+
+    let tmp_dir = tempfile::tempdir().expect("create temp dir");
+    let overrides_path = tmp_dir.path().join("overrides.json");
+    let suppressions_path = tmp_dir.path().join("suppressions.json");
+
+    let mut child = Command::new(&bin)
+        .args([
+            "--overrides",
+            overrides_path.to_str().unwrap(),
+            "--suppressions",
+            suppressions_path.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn zhtw-mcp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    // Initialize
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test-explain", "version": "0.1" }
+            }
+        }),
+    );
+    assert_eq!(resp["id"], 1);
+
+    send_notification(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }),
+    );
+
+    // Lint with explain mode.
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 2,
+            "params": {
+                "name": "zhtw",
+                "arguments": {
+                    "text": "這個軟件很好用",
+                    "explain": true,
+                    "output": "full"
+                }
+            }
+        }),
+    );
+    assert_eq!(resp["id"], 2);
+    let content_text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let output: Value = serde_json::from_str(content_text).unwrap();
+
+    // Issues should be present with explain-specific annotations.
+    let issues = output["issues"].as_array().unwrap();
+    assert!(!issues.is_empty());
+    // Verify explain mode actually produces the explanation annotation
+    // (distinct from the `context` field which exists regardless of explain mode).
+    let has_explanation = issues.iter().any(|i| i.get("explanation").is_some());
+    assert!(
+        has_explanation,
+        "explain mode should produce 'explanation' field on at least one issue"
+    );
+
+    // Lint same text twice — results should be identical (deterministic).
+    let resp2 = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 3,
+            "params": {
+                "name": "zhtw",
+                "arguments": {
+                    "text": "這個軟件很好用",
+                    "explain": true,
+                    "output": "full"
+                }
+            }
+        }),
+    );
+    assert_eq!(resp2["id"], 3);
+    let content_text2 = resp2["result"]["content"][0]["text"].as_str().unwrap();
+    let output2: Value = serde_json::from_str(content_text2).unwrap();
+
+    let issues2 = output2["issues"].as_array().unwrap();
+    assert_eq!(issues, issues2, "same text should produce identical issues");
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+}

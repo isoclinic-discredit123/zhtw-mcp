@@ -1,44 +1,19 @@
-// Google Translate anchor-confirmation for cross-strait term verification.
+// Google Translate calibration layer for cross-strait term verification.
 //
-// Pipeline (confirm, not discover):
-//   1. Scanner finds issues with 'english' fields
-//   2. Extract sentence-context around each issue
-//   3. For each term, check sled cache first (cache hits bypass API cap)
-//   4. On cache miss, call Google Translate zh→en unless max_api_calls cap
-//      reached (serial, 200ms rate-limit between calls)
-//   5. Confirm: if English output contains the rule's 'english' anchor,
-//      the issue is a TRUE cross-strait term (Confirmed → keep severity)
-//   6. If anchor absent → Rejected → downgrade severity to Info
-//   7. If translation fails → Unknown → fail-open (keep severity)
-//
-// Latency control:
-//   - max_api_calls (default 10) caps network calls per confirm_issues() run
-//   - Cache hits are free — only cache misses count toward the cap
-//   - Worst-case: max_api_calls * ~500ms (200ms delay + ~300ms roundtrip)
-//   - transport_failed flag on ConfirmResult lets callers distinguish
-//     "sampling returned Unknown" from "sampling transport broke entirely"
-//
-// Cache design:
-//   - sled embedded key-value DB; path via dirs::cache_dir():
-//     macOS: ~/Library/Caches/zhtw-anchor-translate/translations.db/
-//     Linux: ~/.cache/zhtw-anchor-translate/translations.db/
-//   - sled creates a directory (not a file) at the DB path, with
-//     memory-mapped segment files (~512KB pre-allocated)
-//   - postcard binary serialization (compact, strongly typed)
-//   - SHA-256 keyed entries with 30-day TTL
-//   - Size-limited with random eviction at 10 MB
-//   - Lock detection for concurrent access
+// Pipeline (calibrate, not confirm):
+//   1. Scanner finds issues; some have 'english' fields from matched rules.
+//   2. Extract ±sentence context around each issue, deduplicate.
+//   3. Single google_translate_raw() call (zh→en) on a sentinel-delimited payload.
+//   4. For each issue with 'english' field, check if content-word anchors
+//      appear in the corresponding translated segment.
+//   5. Set issue.anchor_match = Some(true/false/None) as annotation.
+//   6. No severity mutation. Pure annotation. Fail-open on API failure.
 
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use crate::rules::ruleset::{Issue, Severity};
-
-// Tri-state translation outcome
+use crate::rules::ruleset::Issue;
 
 /// Errors from the Google Translate API layer.
 #[derive(Debug)]
@@ -61,267 +36,62 @@ impl fmt::Display for TranslateError {
     }
 }
 
-/// Tri-state outcome of anchor confirmation for a single term.
-#[derive(Debug, PartialEq, Eq)]
-pub enum TranslateOutcome {
-    /// English anchor found in translation — true positive.
-    Confirmed,
-    /// Translation succeeded but anchor absent — likely false positive.
-    Rejected,
-    /// Translation failed — cannot determine; fail-open (keep severity).
-    Unknown,
-}
-
-// Translation cache (sled-backed)
-
-/// Default cache path via `dirs::cache_dir()`:
-/// - macOS: `~/Library/Caches/zhtw-anchor-translate/translations.db/`
-/// - Linux: `~/.cache/zhtw-anchor-translate/translations.db/`
-///
-/// Note: sled creates a directory at this path, not a single file.
-fn default_cache_path() -> PathBuf {
-    dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("zhtw-anchor-translate")
-        .join("translations.db")
-}
-
-/// Cache configuration (mirrors cjk-token-reducer CacheConfig).
-pub struct CacheConfig {
-    /// TTL for cache entries.
-    pub ttl: Duration,
-    /// Maximum cache size in bytes before eviction kicks in.
-    pub max_size_bytes: u64,
-}
-
-impl Default for CacheConfig {
-    fn default() -> Self {
-        Self {
-            ttl: Duration::from_secs(30 * 86400), // 30 days
-            max_size_bytes: 10 * 1024 * 1024,     // 10 MB
-        }
-    }
-}
-
-/// Session-level hit/miss counters (atomic, thread-safe).
-static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
-static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
-static INSERT_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Check interval for cache size enforcement (every N inserts).
-const SIZE_CHECK_INTERVAL: u64 = 50;
-/// Entries larger than this trigger an immediate size check.
-const LARGE_ENTRY_THRESHOLD: usize = 4096;
-/// Maximum eviction rounds to prevent infinite loops.
-const MAX_EVICTION_ROUNDS: usize = 10;
-
-/// Cache entry stored in sled, serialized via postcard.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CacheEntry {
-    translated: String,
-    timestamp: i64, // Unix seconds
-    source_lang: String,
-    target_lang: String,
-}
-
-/// sled-backed translation cache with SHA-256 keys, TTL, and size limits.
-pub struct TranslationCache {
-    db: sled::Db,
-    config: CacheConfig,
-}
-
-impl TranslationCache {
-    /// Open or create the cache at the default location.
-    pub fn open() -> anyhow::Result<Self> {
-        Self::open_at(default_cache_path(), CacheConfig::default())
-    }
-
-    /// Open or create the cache at a specific path.
-    pub fn open_at(path: PathBuf, config: CacheConfig) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let db = match sled::open(&path) {
-            Ok(db) => db,
-            Err(e) => {
-                let msg = e.to_string();
-                // Detect lock errors (concurrent access).
-                // POSIX: lock, EWOULDBLOCK, EBUSY, EPERM
-                // Windows (fs2): "Access is denied", "sharing violation"
-                if msg.contains("lock")
-                    || msg.contains("EWOULDBLOCK")
-                    || msg.contains("EBUSY")
-                    || msg.contains("EPERM")
-                    || msg.contains("Access is denied")
-                    || msg.contains("sharing violation")
-                {
-                    anyhow::bail!(
-                        "Cache locked by another process at {}. Use --no-cache to bypass.",
-                        path.display()
-                    );
-                }
-                return Err(e.into());
-            }
-        };
-
-        Ok(Self { db, config })
-    }
-
-    /// SHA-256 hash key: "{src}:{tgt}:{text}" → 32-byte digest.
-    fn make_key(src: &str, tgt: &str, text: &str) -> Vec<u8> {
-        let mut h = Sha256::new();
-        h.update(format!("{src}:{tgt}:{text}").as_bytes());
-        h.finalize().to_vec()
-    }
-
-    fn now_secs() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64
-    }
-
-    /// Look up a cached translation. Returns None on miss or expiry.
-    pub fn get(&self, src: &str, tgt: &str, text: &str) -> Option<String> {
-        let key = Self::make_key(src, tgt, text);
-        let raw = match self.db.get(&key) {
-            Ok(Some(v)) => v,
-            _ => {
-                CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-                return None;
-            }
-        };
-
-        let entry: CacheEntry = match postcard::from_bytes(&raw) {
-            Ok(e) => e,
-            Err(_) => {
-                // Corrupted entry — remove silently.
-                let _ = self.db.remove(&key);
-                CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-                return None;
-            }
-        };
-
-        // TTL check.
-        let age = Self::now_secs().saturating_sub(entry.timestamp);
-        if age as u64 > self.config.ttl.as_secs() {
-            let _ = self.db.remove(&key);
-            CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-            return None;
-        }
-
-        CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-        Some(entry.translated)
-    }
-
-    /// Store a translation in the cache.
-    pub fn put(&self, src: &str, tgt: &str, text: &str, value: &str) {
-        let key = Self::make_key(src, tgt, text);
-        let entry = CacheEntry {
-            translated: value.to_string(),
-            timestamp: Self::now_secs(),
-            source_lang: src.to_string(),
-            target_lang: tgt.to_string(),
-        };
-
-        let encoded = match postcard::to_allocvec(&entry) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("cache encode error: {e}");
-                return;
-            }
-        };
-
-        let is_large = encoded.len() > LARGE_ENTRY_THRESHOLD;
-        let _ = self.db.insert(&key, encoded);
-
-        let count = INSERT_COUNT.fetch_add(1, Ordering::Relaxed);
-        if is_large || count.is_multiple_of(SIZE_CHECK_INTERVAL) {
-            self.enforce_size_limit();
-        }
-    }
-
-    /// Evict entries if cache exceeds max size (random eviction, ~25% per round).
-    fn enforce_size_limit(&self) {
-        let disk_size = self.db.size_on_disk().unwrap_or(0);
-        if disk_size <= self.config.max_size_bytes {
-            return;
-        }
-
-        for _ in 0..MAX_EVICTION_ROUNDS {
-            let len = self.db.len();
-            if len == 0 {
-                break;
-            }
-            let to_remove = (len / 4).max(1);
-            let mut removed = 0;
-            for item in self.db.iter() {
-                if removed >= to_remove {
-                    break;
-                }
-                if let Ok((key, _)) = item {
-                    let _ = self.db.remove(key);
-                    removed += 1;
-                }
-            }
-
-            let _ = self.db.flush();
-            if self.db.size_on_disk().unwrap_or(0) <= self.config.max_size_bytes {
-                break;
-            }
-        }
-    }
-
-    /// Cache statistics for reporting.
-    pub fn stats(&self) -> CacheStats {
-        CacheStats {
-            entries: self.db.len(),
-            disk_bytes: self.db.size_on_disk().unwrap_or(0),
-            hits: CACHE_HITS.load(Ordering::Relaxed) as usize,
-            misses: CACHE_MISSES.load(Ordering::Relaxed) as usize,
-        }
-    }
-
-    /// Clear all cache entries.
-    pub fn clear(&self) {
-        self.db.clear().ok();
-        let _ = self.db.flush();
-    }
-
-    /// Flush pending writes to disk.
-    pub fn flush(&self) {
-        let _ = self.db.flush();
-    }
-}
-
-pub struct CacheStats {
-    pub entries: usize,
-    pub disk_bytes: u64,
-    pub hits: usize,
-    pub misses: usize,
-}
-
-impl CacheStats {
-    pub fn hit_rate(&self) -> f64 {
-        let total = self.hits + self.misses;
-        if total == 0 {
-            0.0
-        } else {
-            self.hits as f64 / total as f64 * 100.0
-        }
-    }
-}
-
-// Google Translate API (free gtx endpoint)
-
 const GOOGLE_TRANSLATE_URL: &str = "https://translate.googleapis.com/translate_a/single";
 const USER_AGENT: &str = "Mozilla/5.0 (compatible; zhtw-anchor/2.0)";
 
-/// Translate text using the free Google Translate API.
+/// Maximum payload bytes sent to Google Translate in a single request.
+/// The free endpoint rejects overly long URLs; keep well under the ~8KB
+/// practical limit for GET query strings.
+const MAX_PAYLOAD_BYTES: usize = 4096;
+
+/// English stopwords to exclude from anchor matching.  These are so common
+/// in any translation that matching on them provides zero signal.
+const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "will", "would", "shall", "should", "may", "might", "must", "can",
+    "could", "of", "in", "to", "for", "with", "on", "at", "from", "by", "as", "into", "through",
+    "during", "before", "after", "above", "below", "between", "under", "again", "further", "then",
+    "once", "here", "there", "when", "where", "why", "how", "all", "each", "every", "both", "few",
+    "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+    "than", "too", "very", "just", "about", "also", "and", "but", "or", "if", "while", "that",
+    "this", "these", "those", "it", "its", "he", "she", "they", "them", "we", "you", "i", "me",
+    "my", "your", "his", "her", "our", "their", "what", "which", "who", "whom", "s", "t", "don",
+    "doesn", "didn", "won", "wouldn", "shouldn", "couldn",
+];
+
+/// Tokenize English text into lowercase words, splitting on whitespace and
+/// punctuation (preserving hyphens and apostrophes within words).  Hyphenated
+/// and possessive tokens also emit their sub-parts.
+pub(crate) fn tokenize_words(text: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    for chunk in text.split(|c: char| {
+        c.is_ascii_whitespace() || (c.is_ascii_punctuation() && c != '-' && c != '\'')
+    }) {
+        if chunk.is_empty() {
+            continue;
+        }
+        tokens.push(chunk.to_string());
+        // Emit sub-parts for hyphenated or possessive tokens.
+        if chunk.contains('-') || chunk.contains('\'') {
+            for sub in chunk.split(['-', '\'']) {
+                if !sub.is_empty() && sub != chunk {
+                    tokens.push(sub.to_string());
+                }
+            }
+        }
+    }
+    tokens
+}
+
+/// Call Google Translate free endpoint (client=gtx).
 ///
-/// Returns the translated text, or a 'TranslateError' on failure.
-fn google_translate_raw(text: &str, src: &str, tgt: &str) -> Result<String, TranslateError> {
+/// Returns `TranslateError::Parse` if the response is valid JSON but contains
+/// no translated text fragments (endpoint shape change).
+pub(crate) fn google_translate_raw(
+    text: &str,
+    src: &str,
+    tgt: &str,
+) -> Result<String, TranslateError> {
     let url = format!(
         "{GOOGLE_TRANSLATE_URL}?client=gtx&sl={src}&tl={tgt}&dt=t&q={}",
         urlencoding::encode(text)
@@ -362,377 +132,342 @@ fn google_translate_raw(text: &str, src: &str, tgt: &str) -> Result<String, Tran
         }
     }
 
+    // #4: Detect endpoint shape change — valid JSON but no translated fragments.
+    if result.is_empty() {
+        return Err(TranslateError::Parse(
+            "response JSON had no translated text fragments".into(),
+        ));
+    }
+
     Ok(result)
 }
 
-// Context extraction
+/// Result of a calibration run.
+#[derive(Debug, Clone)]
+pub struct CalibrateResult {
+    /// Whether the API call succeeded.
+    pub api_ok: bool,
+    /// The full translated text (empty if API failed).
+    pub translated: String,
+    /// Number of tokens in the translation.
+    pub token_count: usize,
+    /// Issues where anchor was found in translation.
+    pub matched: usize,
+    /// Issues where anchor was NOT found in translation.
+    pub unmatched: usize,
+    /// Issues with no `english` field (left as None).
+    pub no_english: usize,
+}
 
-/// Extract sentence-ish context around a byte offset for translation.
-///
-/// Scans backwards and forwards for CJK sentence-ending punctuation
-/// (。！？ or newline), falling back to a fixed window.
-fn extract_context(text: &str, offset: usize, length: usize, window: usize) -> &str {
-    let len = text.len();
+/// Sentinel prefix for segment delimiters in the translation payload.
+/// Chosen to be unlikely to appear in Chinese text and stable through
+/// translation (numbers are preserved verbatim by Google Translate).
+const SENTINEL_PREFIX: &str = "###SEG";
 
-    // Find start: clamp to char boundary, then scan backwards for sentence end.
-    let raw_start = text.floor_char_boundary(offset.saturating_sub(window));
-    let mut start = raw_start;
-    let prefix = &text[raw_start..offset.min(len)];
-    for (i, ch) in prefix.char_indices().rev() {
-        if matches!(ch, '。' | '！' | '？' | '\n') {
-            start = raw_start + i + ch.len_utf8();
+/// Extract ±sentence context around an issue offset, bounded by CJK sentence
+/// punctuation (。！？) or paragraph breaks (\n), up to ~40 characters in
+/// each direction.
+fn extract_issue_context(text: &str, offset: usize) -> &str {
+    let offset = offset.min(text.len());
+    let offset = text.floor_char_boundary(offset);
+
+    fn is_sentence_boundary(c: char) -> bool {
+        matches!(c, '\n' | '\r' | '。' | '！' | '？' | '；')
+    }
+
+    // Scan backward by characters.
+    let mut start = offset;
+    let mut chars_back = 0;
+    for (idx, c) in text[..offset].char_indices().rev() {
+        if is_sentence_boundary(c) {
+            start = idx + c.len_utf8();
+            break;
+        }
+        start = idx;
+        chars_back += 1;
+        if chars_back >= 40 {
             break;
         }
     }
 
-    // Find end: clamp to char boundary, then scan forwards for sentence end.
-    let match_end = (offset + length).min(len);
-    let raw_end = text.floor_char_boundary((match_end + window).min(len));
-    let mut end = raw_end;
-    let suffix = &text[match_end..raw_end];
-    for (i, ch) in suffix.char_indices() {
-        if matches!(ch, '。' | '！' | '？' | '\n') {
-            end = match_end + i + ch.len_utf8();
+    // Scan forward by characters.
+    let mut end = offset;
+    let mut chars_fwd = 0;
+    for (idx, c) in text[offset..].char_indices() {
+        if is_sentence_boundary(c) {
+            end = offset + idx;
+            break;
+        }
+        end = offset + idx + c.len_utf8();
+        chars_fwd += 1;
+        if chars_fwd >= 40 {
             break;
         }
     }
 
-    text[start..end].trim()
+    &text[start..end]
 }
 
-// Anchor confirmation: the core algorithm
-
-/// Configuration for anchor-confirmation.
-pub struct ConfirmConfig {
-    /// Delay between API calls to avoid rate limiting.
-    pub request_delay: Duration,
-    /// If true, downgrade unconfirmed issues to Info instead of removing them.
-    pub downgrade_unconfirmed: bool,
-    /// Maximum number of Google Translate API calls per confirm pass.
-    /// After hitting this cap, remaining terms get Unknown outcome (fail-open).
-    /// Bounds worst-case latency to max_api_calls * (~300ms HTTP + request_delay).
-    pub max_api_calls: usize,
+/// Filter anchor words to content words only (remove stopwords and
+/// single-character tokens that are likely noise).
+fn content_anchor_words(english: &str) -> Vec<String> {
+    let stopset: HashSet<&str> = STOPWORDS.iter().copied().collect();
+    english
+        .split('/')
+        .flat_map(|v| tokenize_words(v.trim()))
+        .map(|t| t.to_lowercase())
+        .filter(|w| w.len() > 1 && !stopset.contains(w.as_str()))
+        .collect()
 }
 
-impl Default for ConfirmConfig {
-    fn default() -> Self {
-        Self {
-            request_delay: Duration::from_millis(200),
-            downgrade_unconfirmed: true,
-            max_api_calls: 10,
-        }
-    }
-}
-
-/// Result of the confirmation pass.
-pub struct ConfirmResult {
-    /// Number of issues confirmed by English anchor match.
-    pub confirmed: usize,
-    /// Number of issues rejected (translation succeeded, anchor absent).
-    pub unconfirmed: usize,
-    /// Number of issues where translation failed (fail-open, severity preserved).
-    pub unknown: usize,
-    /// Number of API calls made.
-    pub api_calls: usize,
-    /// Number of cache hits.
-    pub cache_hits: usize,
-    /// True when the transport itself failed (sampling timeout/error), distinct
-    /// from individual terms being Unknown. Callers can use this to decide
-    /// whether to fall back to an alternative confirmation path.
-    pub transport_failed: bool,
-}
-
-/// Determine the outcome for a single term given its english anchor and
-/// the translation result.
-fn check_anchor(
-    english: &str,
-    translate_result: &Result<String, TranslateError>,
-) -> TranslateOutcome {
-    match translate_result {
-        Err(e) => {
-            log::debug!("translation failed, keeping severity (fail-open): {e}");
-            TranslateOutcome::Unknown
-        }
-        Ok(translated) if translated.is_empty() => {
-            // Empty response from API — treat as unknown, not rejected.
-            log::debug!("empty translation response, keeping severity (fail-open)");
-            TranslateOutcome::Unknown
-        }
-        Ok(translated) => {
-            let translated_lower = translated.to_lowercase();
-            let found = english
-                .split('/')
-                .map(|v| v.trim().to_lowercase())
-                .filter(|v| v.len() >= 3)
-                .any(|v| translated_lower.contains(&v));
-            if found {
-                TranslateOutcome::Confirmed
-            } else {
-                TranslateOutcome::Rejected
-            }
-        }
-    }
-}
-
-/// Apply a single outcome: tally counters and optionally downgrade severity.
-fn apply_outcome(
-    outcome: &TranslateOutcome,
-    issue: &mut Issue,
-    confirmed: &mut usize,
-    unconfirmed: &mut usize,
-    unknown_count: &mut usize,
-    downgrade: bool,
-) {
-    match outcome {
-        TranslateOutcome::Confirmed => *confirmed += 1,
-        TranslateOutcome::Rejected => {
-            *unconfirmed += 1;
-            if downgrade {
-                issue.severity = Severity::Info;
-            }
-        }
-        TranslateOutcome::Unknown => *unknown_count += 1,
-    }
-}
-
-/// Run anchor-confirmation on a list of issues.
+/// Calibrate issues by translating their context sentences and checking for
+/// English anchor matches.
 ///
-/// For each issue that has an 'english' field, translates the surrounding
-/// context from zh-TW to English and checks if the translation contains
-/// the expected English term.
+/// - `Some(true)`: anchor present in non-empty translation segment.
+/// - `Some(false)`: anchor absent in non-empty translation segment.
+/// - `None`: calibration not attempted (no `english` field, API failure,
+///   empty input, empty translation, no content words in anchor).
 ///
-/// Tri-state outcomes:
-/// - Confirmed — anchor found in translation; keep severity.
-/// - Rejected — translation succeeded, anchor absent; downgrade to Info.
-/// - Unknown — translation failed (network/rate-limit/parse); keep severity (fail-open).
-///
-/// Issues without an 'english' field are left unchanged.
-pub fn confirm_issues(
-    issues: &mut [Issue],
-    text: &str,
-    config: &ConfirmConfig,
-    cache: Option<&TranslationCache>,
-) -> ConfirmResult {
-    // Reset session counters.
-    CACHE_HITS.store(0, Ordering::Relaxed);
-    CACHE_MISSES.store(0, Ordering::Relaxed);
-    INSERT_COUNT.store(0, Ordering::Relaxed);
+/// Pure annotation. No severity mutation. Fail-open on API failure.
+pub fn calibrate_issues(text: &str, issues: &mut [Issue]) -> CalibrateResult {
+    let mut result = CalibrateResult {
+        api_ok: false,
+        translated: String::new(),
+        token_count: 0,
+        matched: 0,
+        unmatched: 0,
+        no_english: 0,
+    };
 
-    let mut confirmed = 0usize;
-    let mut unconfirmed = 0usize;
-    let mut unknown_count = 0usize;
-    let mut api_calls = 0usize;
-
-    // Dedup key is (found, english) — same surface form in different semantic
-    // contexts (different english anchors) must be translated separately.
-    let mut term_results: HashMap<(String, String), TranslateOutcome> = HashMap::new();
-
-    for issue in issues.iter_mut() {
-        let english = match &issue.english {
-            Some(e) if !e.trim().is_empty() => e.trim().to_string(),
-            _ => continue, // no english anchor — leave unchanged
-        };
-
-        let dedup_key = (issue.found.clone(), english.clone());
-
-        // Check if we already translated this (term, english) pair.
-        if let Some(outcome) = term_results.get(&dedup_key) {
-            apply_outcome(
-                outcome,
-                issue,
-                &mut confirmed,
-                &mut unconfirmed,
-                &mut unknown_count,
-                config.downgrade_unconfirmed,
-            );
-            continue;
-        }
-
-        // Extract context around the issue.
-        let context = extract_context(text, issue.offset, issue.length, 80);
-        if context.is_empty() {
-            term_results.insert(dedup_key, TranslateOutcome::Unknown);
-            unknown_count += 1;
-            continue;
-        }
-
-        // Check cache first — cache hits work regardless of API cap.
-        if let Some(c) = cache {
-            if let Some(cached) = c.get("zh-TW", "en", context) {
-                let outcome = check_anchor(&english, &Ok(cached));
-                apply_outcome(
-                    &outcome,
-                    issue,
-                    &mut confirmed,
-                    &mut unconfirmed,
-                    &mut unknown_count,
-                    config.downgrade_unconfirmed,
-                );
-                term_results.insert(dedup_key, outcome);
-                continue;
-            }
-        }
-
-        // Cache miss — check API cap before making a network call.
-        if api_calls >= config.max_api_calls {
-            term_results.insert(dedup_key, TranslateOutcome::Unknown);
-            unknown_count += 1;
-            continue;
-        }
-
-        // Network call.
-        let translate_result = google_translate_raw(context, "zh-TW", "en");
-        api_calls += 1;
-
-        // Cache successful results.
-        if let (Ok(ref translated), Some(c)) = (&translate_result, cache) {
-            if !translated.is_empty() {
-                c.put("zh-TW", "en", context, translated);
-            }
-        }
-
-        // Rate-limit between network requests.
-        if !config.request_delay.is_zero() {
-            std::thread::sleep(config.request_delay);
-        }
-
-        let outcome = check_anchor(&english, &translate_result);
-        apply_outcome(
-            &outcome,
-            issue,
-            &mut confirmed,
-            &mut unconfirmed,
-            &mut unknown_count,
-            config.downgrade_unconfirmed,
-        );
-        term_results.insert(dedup_key, outcome);
+    // Short-circuit: nothing to calibrate.
+    if text.trim().is_empty() || issues.is_empty() {
+        result.no_english = issues.len();
+        return result;
     }
 
-    let cache_hits = cache.map_or(0, |c| c.stats().hits);
-
-    // Flush cache to disk.
-    if let Some(c) = cache {
-        c.flush();
-    }
-
-    ConfirmResult {
-        confirmed,
-        unconfirmed,
-        unknown: unknown_count,
-        api_calls,
-        cache_hits,
-        transport_failed: false,
-    }
-}
-
-/// Run anchor-confirmation using a sampling bridge.
-///
-/// Collects all terms with english anchors, sends them to the LLM in a single
-/// bulk request, and applies the boolean results. Falls back gracefully: if the
-/// bridge returns None (timeout, error, budget), all terms get `Unknown` outcome.
-///
-/// Uses a separate budget from disambiguation sampling (budget=1 for the single
-/// bulk call), so it does not consume the disambiguation budget.
-pub(crate) fn confirm_issues_with_sampling(
-    issues: &mut [Issue],
-    text: &str,
-    bridge: &mut crate::mcp::sampling::SamplingBridge<'_>,
-    config: &ConfirmConfig,
-) -> ConfirmResult {
-    use crate::mcp::sampling::BulkConfirmTerm;
-
-    let mut confirmed = 0usize;
-    let mut unconfirmed = 0usize;
-    let mut unknown_count = 0usize;
-
-    // Collect unique (found, english) terms with their contexts.
-    let mut seen: HashMap<(String, String), usize> = HashMap::new();
-    let mut terms: Vec<BulkConfirmTerm> = Vec::new();
+    // Collect unique context sentences for issues that have english fields.
+    // Map each issue index to its context segment index.
+    // #6: Use HashMap<String, usize> instead of HashSet + position() scan.
+    let mut segments: Vec<String> = Vec::new();
+    let mut segment_map: HashMap<String, usize> = HashMap::new();
+    let mut issue_to_segment: Vec<Option<usize>> = Vec::with_capacity(issues.len());
 
     for issue in issues.iter() {
-        let english = match &issue.english {
-            Some(e) if !e.trim().is_empty() => e.trim().to_string(),
-            _ => continue,
+        if issue.english.is_none() {
+            issue_to_segment.push(None);
+            result.no_english += 1;
+            continue;
+        }
+
+        let ctx = extract_issue_context(text, issue.offset).to_string();
+        if ctx.trim().is_empty() {
+            issue_to_segment.push(None);
+            result.no_english += 1;
+            continue;
+        }
+
+        let seg_idx = *segment_map.entry(ctx.clone()).or_insert_with(|| {
+            let idx = segments.len();
+            segments.push(ctx);
+            idx
+        });
+        issue_to_segment.push(Some(seg_idx));
+    }
+
+    if segments.is_empty() {
+        return result;
+    }
+
+    // #5: Cap payload size.  If the joined payload exceeds MAX_PAYLOAD_BYTES,
+    // truncate to the segments that fit.  Issues referencing truncated segments
+    // will get anchor_match = None (fail-open).
+    // Also cap individual segments: a single oversized context must not blow
+    // past the URL limit and disable calibration for the entire batch.
+    let max_segment_bytes = MAX_PAYLOAD_BYTES / 2; // no single segment > half budget
+    let max_segments = {
+        let mut total = 0usize;
+        let mut count = 0usize;
+        for seg in &segments {
+            // Account for sentinel + newline overhead per segment.
+            let overhead = SENTINEL_PREFIX.len() + 6 + 1; // "###SEGnn\n"
+            let seg_cost = seg.len().min(max_segment_bytes) + overhead;
+            if total + seg_cost > MAX_PAYLOAD_BYTES && count > 0 {
+                break;
+            }
+            total += seg_cost;
+            count += 1;
+        }
+        count
+    };
+
+    // #2: Use sentinel markers instead of bare \n for segment delimiting.
+    // Format: "###SEG0\n<segment0>\n###SEG1\n<segment1>\n..."
+    // After translation, find markers to recover per-segment text.
+    // Note: if user text literally contains "###SEG\d+", sentinel parsing could
+    // be corrupted.  Acceptable risk — this pattern is vanishingly rare in zh-TW.
+    let mut payload = String::new();
+    let mut truncated_segments: HashSet<usize> = HashSet::new();
+    for (i, seg) in segments.iter().enumerate() {
+        if i >= max_segments {
+            break;
+        }
+        if !payload.is_empty() {
+            payload.push('\n');
+        }
+        // Truncate oversized segments at a char boundary to stay within budget.
+        // Truncated segments get anchor_match = None (the anchor word might have
+        // been beyond the truncation point — evaluating would create false negatives).
+        let truncated = if seg.len() > max_segment_bytes {
+            truncated_segments.insert(i);
+            &seg[..seg.floor_char_boundary(max_segment_bytes)]
+        } else {
+            seg.as_str()
         };
-        let key = (issue.found.clone(), english.clone());
-        if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(key) {
-            let context = extract_context(text, issue.offset, issue.length, 80);
-            e.insert(terms.len());
-            terms.push(BulkConfirmTerm {
-                found: issue.found.clone(),
-                english,
-                context: context.to_string(),
-            });
+        payload.push_str(&format!("{SENTINEL_PREFIX}{i}\n{truncated}"));
+    }
+
+    // Translate.
+    let translation = match google_translate_raw(&payload, "zh", "en") {
+        Ok(t) => t,
+        Err(_) => {
+            // Fail-open: all anchor_match = None.
+            return result;
+        }
+    };
+
+    result.api_ok = true;
+    result.translated = translation.clone();
+
+    // #2: Parse sentinel-delimited translation back into per-segment results.
+    // Look for "###SEGn" markers (case-insensitive, Google may capitalize).
+    let translated_segments = parse_sentinel_segments(&translation, segments.len());
+
+    // Tokenize each segment.
+    let segment_tokens: Vec<HashSet<String>> = translated_segments
+        .iter()
+        .map(|seg| {
+            tokenize_words(seg)
+                .into_iter()
+                .map(|t| t.to_lowercase())
+                .collect()
+        })
+        .collect();
+
+    result.token_count = segment_tokens.iter().map(|s| s.len()).sum();
+
+    // Check each issue against its corresponding segment.
+    for (i, issue) in issues.iter_mut().enumerate() {
+        let seg_idx = match issue_to_segment.get(i).copied().flatten() {
+            Some(idx) => idx,
+            None => continue, // no english field → anchor_match stays None
+        };
+
+        // Segment was dropped (payload cap) or individually truncated → no signal.
+        // Truncated segments might have lost the anchor word beyond the cut point.
+        if seg_idx >= max_segments || truncated_segments.contains(&seg_idx) {
+            continue;
+        }
+
+        let english = match &issue.english {
+            Some(e) => e.clone(),
+            None => continue,
+        };
+
+        // Get the token set for this segment.
+        let tokens = match segment_tokens.get(seg_idx) {
+            Some(t) if !t.is_empty() => t,
+            _ => continue, // empty/missing → no signal
+        };
+
+        // #1: Filter to content words only (no stopwords, no single chars).
+        let anchors = content_anchor_words(&english);
+        if anchors.is_empty() {
+            // All anchor words were stopwords → no signal, not a false negative.
+            continue;
+        }
+
+        let found = anchors.iter().any(|w| tokens.contains(w));
+
+        issue.anchor_match = Some(found);
+        if found {
+            result.matched += 1;
+        } else {
+            result.unmatched += 1;
         }
     }
 
-    if terms.is_empty() {
-        return ConfirmResult {
-            confirmed: 0,
-            unconfirmed: 0,
-            unknown: 0,
-            api_calls: 0,
-            cache_hits: 0,
-            transport_failed: false,
-        };
+    result
+}
+
+/// Parse sentinel-delimited translation output.
+///
+/// Looks for `###SEGn` markers (case-insensitive) and extracts the text
+/// between consecutive markers.  Returns a Vec indexed by segment number;
+/// missing segments get empty strings.
+fn parse_sentinel_segments(translation: &str, expected_count: usize) -> Vec<String> {
+    let lower = translation.to_lowercase();
+    let sentinel_lower = SENTINEL_PREFIX.to_lowercase();
+
+    // Find all marker positions: (byte_offset, segment_number).
+    let mut markers: Vec<(usize, usize)> = Vec::new();
+    let mut search_from = 0;
+    while let Some(pos) = lower[search_from..].find(&sentinel_lower) {
+        let abs_pos = search_from + pos;
+        let after_prefix = abs_pos + sentinel_lower.len();
+        // Parse the segment number immediately after the prefix.
+        let num_str: String = lower[after_prefix..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(n) = num_str.parse::<usize>() {
+            let content_start = after_prefix + num_str.len();
+            // Skip optional newline after marker.
+            let content_start = if translation.as_bytes().get(content_start) == Some(&b'\n') {
+                content_start + 1
+            } else {
+                content_start
+            };
+            markers.push((content_start, n));
+        }
+        search_from = abs_pos + sentinel_lower.len();
     }
 
-    // Single bulk LLM call.
-    let bulk_result = bridge.sample_bulk_confirm(&terms);
-    let bulk_succeeded = bulk_result.is_some();
+    let mut result = vec![String::new(); expected_count];
 
-    // Build outcome map from index-keyed LLM response.
-    let mut term_outcomes: HashMap<(String, String), TranslateOutcome> = HashMap::new();
-    match bulk_result {
-        Some(map) => {
-            for (idx, term) in terms.iter().enumerate() {
-                let outcome = match map.get(&idx) {
-                    Some(true) => TranslateOutcome::Confirmed,
-                    Some(false) => TranslateOutcome::Rejected,
-                    None => TranslateOutcome::Unknown,
-                };
-                term_outcomes.insert((term.found.clone(), term.english.clone()), outcome);
+    if markers.is_empty() {
+        // No markers found — Google may have stripped them.  Fall back to
+        // newline splitting for backward compat (best-effort).
+        for (i, line) in translation.split('\n').enumerate() {
+            if i < expected_count {
+                result[i] = line.trim().to_string();
             }
         }
-        None => {
-            // LLM unavailable — all terms are Unknown (fail-open).
-            for term in &terms {
-                term_outcomes.insert(
-                    (term.found.clone(), term.english.clone()),
-                    TranslateOutcome::Unknown,
-                );
-            }
+        return result;
+    }
+
+    // For each marker, extract text from content_start to the byte position
+    // where the next marker begins (searching for the sentinel prefix in the
+    // original case-insensitive text).
+    for (idx, &(start, seg_num)) in markers.iter().enumerate() {
+        if seg_num >= expected_count {
+            continue;
         }
-    }
-
-    // Apply outcomes to issues.
-    for issue in issues.iter_mut() {
-        let english = match &issue.english {
-            Some(e) if !e.trim().is_empty() => e.trim().to_string(),
-            _ => continue,
+        let end = if idx + 1 < markers.len() {
+            // Find where the next sentinel prefix starts in the original text.
+            // markers[idx+1].0 is the content start (after "###SEGn\n"), so we
+            // need to back up to find the "###SEG" prefix itself.
+            let next_content = markers[idx + 1].0;
+            // Search backwards from next_content for the sentinel prefix.
+            lower[..next_content]
+                .rfind(&sentinel_lower)
+                .unwrap_or(next_content)
+        } else {
+            translation.len()
         };
-        let key = (issue.found.clone(), english);
-        let outcome = term_outcomes
-            .get(&key)
-            .unwrap_or(&TranslateOutcome::Unknown);
-        apply_outcome(
-            outcome,
-            issue,
-            &mut confirmed,
-            &mut unconfirmed,
-            &mut unknown_count,
-            config.downgrade_unconfirmed,
-        );
+        result[seg_num] = translation[start..end].trim().to_string();
     }
 
-    ConfirmResult {
-        confirmed,
-        unconfirmed,
-        unknown: unknown_count,
-        api_calls: if bulk_succeeded { 1 } else { 0 },
-        cache_hits: 0,
-        transport_failed: !bulk_succeeded,
-    }
+    result
 }
 
 #[cfg(test)]
@@ -740,301 +475,189 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_context_sentence_boundaries() {
-        let text = "前面的句子。這是包含目標詞的句子。後面的句子。";
-        let target = "目標詞";
-        let pos = text.find(target).unwrap();
-        let ctx = extract_context(text, pos, target.len(), 80);
-        assert!(ctx.contains(target));
-        assert!(!ctx.contains("前面的句子"));
-        assert!(!ctx.contains("後面的句子"));
+    fn tokenize_words_basic() {
+        let tokens = tokenize_words("Hello, world! This is a test.");
+        assert!(tokens.contains(&"Hello".to_string()));
+        assert!(tokens.contains(&"world".to_string()));
+        assert!(tokens.contains(&"test".to_string()));
     }
 
     #[test]
-    fn extract_context_fallback_window() {
-        let text = "abcdef目標ghijkl";
-        let target = "目標";
-        let pos = text.find(target).unwrap();
-        let ctx = extract_context(text, pos, target.len(), 4);
-        assert!(ctx.contains(target));
+    fn tokenize_words_hyphenated() {
+        let tokens = tokenize_words("multi-threaded server-side");
+        assert!(tokens.contains(&"multi-threaded".to_string()));
+        assert!(tokens.contains(&"multi".to_string()));
+        assert!(tokens.contains(&"threaded".to_string()));
     }
 
     #[test]
-    fn cache_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let cache = TranslationCache::open_at(path, CacheConfig::default()).unwrap();
-
-        // Miss.
-        assert!(cache.get("zh-TW", "en", "hello").is_none());
-
-        // Put + hit.
-        cache.put("zh-TW", "en", "hello", "world");
-        let val = cache.get("zh-TW", "en", "hello");
-        assert_eq!(val.as_deref(), Some("world"));
+    fn tokenize_words_possessive() {
+        let tokens = tokenize_words("it's don't");
+        assert!(tokens.contains(&"it's".to_string()));
+        assert!(tokens.contains(&"it".to_string()));
+        assert!(tokens.contains(&"s".to_string()));
     }
 
+    // #3: Context extraction now counts chars, not bytes, and respects CJK punctuation.
     #[test]
-    fn cache_ttl_expiry() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let config = CacheConfig {
-            ttl: Duration::from_secs(0), // instant expiry
-            max_size_bytes: 10 * 1024 * 1024,
-        };
-        let cache = TranslationCache::open_at(path, config).unwrap();
-
-        cache.put("zh-TW", "en", "hello", "world");
-        // With 0-second TTL, wait for the timestamp to roll over to the next second.
-        std::thread::sleep(Duration::from_secs(1));
-        assert!(cache.get("zh-TW", "en", "hello").is_none());
-    }
-
-    #[test]
-    fn cache_clear() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.db");
-        let cache = TranslationCache::open_at(path, CacheConfig::default()).unwrap();
-
-        cache.put("zh-TW", "en", "hello", "world");
-        assert!(cache.get("zh-TW", "en", "hello").is_some());
-
-        cache.clear();
-        assert_eq!(cache.stats().entries, 0);
-    }
-
-    #[test]
-    fn cache_key_deterministic() {
-        let k1 = TranslationCache::make_key("zh-TW", "en", "hello");
-        let k2 = TranslationCache::make_key("zh-TW", "en", "hello");
-        assert_eq!(k1, k2);
-        assert_eq!(k1.len(), 32); // SHA-256 = 32 bytes
-    }
-
-    #[test]
-    fn cache_key_differs_for_different_text() {
-        let k1 = TranslationCache::make_key("zh-TW", "en", "hello");
-        let k2 = TranslationCache::make_key("zh-TW", "en", "world");
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn confirm_issues_skips_without_english() {
-        let mut issues = vec![{
-            let mut i = Issue::new(
-                0,
-                6,
-                "測試",
-                vec!["test".into()],
-                crate::rules::ruleset::IssueType::CrossStrait,
-                Severity::Warning,
-            );
-            i.line = 1;
-            i.col = 1;
-            i
-        }];
-
-        let config = ConfirmConfig {
-            request_delay: Duration::ZERO,
-            downgrade_unconfirmed: true,
-            max_api_calls: 10,
-        };
-        let result = confirm_issues(&mut issues, "測試文字", &config, None);
-
-        // No english field → skipped entirely, severity unchanged.
-        assert_eq!(result.confirmed, 0);
-        assert_eq!(result.unconfirmed, 0);
-        assert_eq!(issues[0].severity, Severity::Warning);
-    }
-
-    // check_anchor unit tests
-
-    #[test]
-    fn check_anchor_confirmed_when_english_present() {
-        let result = Ok("This is about rendering in computer graphics".to_string());
-        assert_eq!(
-            check_anchor("rendering", &result),
-            TranslateOutcome::Confirmed
+    fn extract_context_respects_cjk_sentence_punctuation() {
+        let text = "第一句話。這個軟件很好用。第三句話在這裡。";
+        // Offset points into the second sentence (after 。).
+        let second_sentence_offset = "第一句話。".len();
+        let ctx = extract_issue_context(text, second_sentence_offset);
+        // Should NOT include the first sentence (bounded by 。).
+        assert!(!ctx.contains("第一句話"), "context leaked past 。: {ctx}");
+        assert!(
+            ctx.contains("軟件"),
+            "context should contain the issue: {ctx}"
         );
     }
 
     #[test]
-    fn check_anchor_confirmed_slash_variants() {
-        // english field with slash-separated variants
-        let result = Ok("The simulation results are accurate".to_string());
-        assert_eq!(
-            check_anchor("simulation/emulation", &result),
-            TranslateOutcome::Confirmed
+    fn extract_context_counts_chars_not_bytes() {
+        // 50 CJK characters = 150 bytes.  With ±40 char window, context
+        // should be bounded around ~40 chars each direction, not 40 bytes.
+        let text: String = (0..50).map(|_| '測').collect();
+        let ctx = extract_issue_context(&text, text.len() / 2);
+        let char_count = ctx.chars().count();
+        // Should be ~80 chars (40 back + 40 forward), not ~26 (80 bytes / 3).
+        assert!(
+            char_count >= 50,
+            "context too short: {char_count} chars (byte-counting bug?)"
         );
     }
 
     #[test]
-    fn check_anchor_rejected_when_anchor_absent() {
-        let result = Ok("This is about painting techniques in art".to_string());
-        assert_eq!(
-            check_anchor("rendering", &result),
-            TranslateOutcome::Rejected
+    fn extract_context_at_start() {
+        let text = "軟件品質很好。";
+        let ctx = extract_issue_context(text, 0);
+        assert!(!ctx.is_empty());
+    }
+
+    #[test]
+    fn extract_context_at_end() {
+        let text = "測試文字";
+        let ctx = extract_issue_context(text, text.len());
+        assert!(!ctx.is_empty());
+    }
+
+    // #1: Stopword filtering prevents false matches on common words.
+    #[test]
+    fn content_anchor_words_filters_stopwords() {
+        let words = content_anchor_words("if and only if");
+        // "if", "and" are stopwords; "only" is also a stopword.
+        assert!(
+            words.is_empty(),
+            "all stopwords should be filtered: {words:?}"
         );
     }
 
     #[test]
-    fn check_anchor_unknown_on_io_error() {
-        let result = Err(TranslateError::Io("connection refused".into()));
-        assert_eq!(
-            check_anchor("rendering", &result),
-            TranslateOutcome::Unknown
+    fn content_anchor_words_keeps_content() {
+        let words = content_anchor_words("memory (RAM)");
+        assert!(words.contains(&"memory".to_string()));
+        assert!(words.contains(&"ram".to_string()));
+        assert!(!words.contains(&"a".to_string())); // single char filtered
+    }
+
+    #[test]
+    fn content_anchor_words_multivariant() {
+        let words = content_anchor_words("simulation/emulation");
+        assert!(words.contains(&"simulation".to_string()));
+        assert!(words.contains(&"emulation".to_string()));
+    }
+
+    // #2: Sentinel segment parsing.
+    #[test]
+    fn parse_sentinel_segments_basic() {
+        let translation = "###SEG0\nThis is memory.\n###SEG1\nA friend afar.";
+        let segs = parse_sentinel_segments(translation, 2);
+        assert_eq!(segs.len(), 2);
+        assert!(
+            segs[0].contains("memory"),
+            "seg0 should contain 'memory': {:?}",
+            segs[0]
+        );
+        assert!(
+            segs[1].contains("friend"),
+            "seg1 should contain 'friend': {:?}",
+            segs[1]
         );
     }
 
     #[test]
-    fn check_anchor_unknown_on_rate_limit() {
-        let result = Err(TranslateError::RateLimit(429));
-        assert_eq!(
-            check_anchor("rendering", &result),
-            TranslateOutcome::Unknown
+    fn parse_sentinel_segments_case_insensitive() {
+        // Google Translate may capitalize the sentinel.
+        let translation = "###Seg0\nTranslated text here.";
+        let segs = parse_sentinel_segments(translation, 1);
+        assert!(
+            !segs[0].is_empty(),
+            "should handle case-insensitive markers"
         );
     }
 
     #[test]
-    fn check_anchor_unknown_on_parse_error() {
-        let result = Err(TranslateError::Parse("invalid json".into()));
-        assert_eq!(check_anchor("anything", &result), TranslateOutcome::Unknown);
+    fn parse_sentinel_segments_missing_markers() {
+        // If Google strips all markers, fall back to newline splitting.
+        let translation = "Line one translation.\nLine two translation.";
+        let segs = parse_sentinel_segments(translation, 2);
+        assert_eq!(segs.len(), 2);
+        assert!(!segs[0].is_empty());
+        assert!(!segs[1].is_empty());
     }
 
     #[test]
-    fn check_anchor_unknown_on_empty_translation() {
-        // Empty string from API = unknown, NOT rejected.
-        let result = Ok(String::new());
-        assert_eq!(
-            check_anchor("rendering", &result),
-            TranslateOutcome::Unknown
-        );
+    fn calibrate_empty_text() {
+        let mut issues = vec![];
+        let r = calibrate_issues("", &mut issues);
+        assert!(!r.api_ok);
+        assert_eq!(r.matched, 0);
     }
 
     #[test]
-    fn check_anchor_case_insensitive() {
-        let result = Ok("The RENDERING pipeline is complex".to_string());
-        assert_eq!(
-            check_anchor("rendering", &result),
-            TranslateOutcome::Confirmed
-        );
+    fn calibrate_empty_issues() {
+        let mut issues = vec![];
+        let r = calibrate_issues("Some text here", &mut issues);
+        assert!(!r.api_ok);
+        assert_eq!(r.matched, 0);
     }
 
     #[test]
-    fn check_anchor_skips_short_variants() {
-        // Variants < 3 chars are skipped to avoid false matches.
-        let result = Ok("This is an example".to_string());
-        assert_eq!(
-            check_anchor("an/example", &result),
-            TranslateOutcome::Confirmed
-        );
-        // "an" is 2 chars → skipped, but "example" matches.
-        let result2 = Ok("An unrelated text".to_string());
-        assert_eq!(check_anchor("an", &result2), TranslateOutcome::Rejected);
+    fn calibrate_no_english_field() {
+        let mut issues = vec![Issue::new(
+            0,
+            6,
+            "軟件",
+            vec!["軟體".to_string()],
+            crate::rules::ruleset::IssueType::CrossStrait,
+            crate::rules::ruleset::Severity::Warning,
+        )];
+        // english is None by default
+        assert!(issues[0].english.is_none());
+        let r = calibrate_issues("這個軟件很好", &mut issues);
+        assert_eq!(r.no_english, 1);
+        assert!(issues[0].anchor_match.is_none());
     }
 
-    // Windows lock detection
-
+    // #1: Anchor with only stopwords should produce None, not false positive.
     #[test]
-    fn open_at_windows_lock_error_message() {
-        // Simulate a Windows-style lock error via a path that triggers sled to fail.
-        // We can't easily force sled to produce Windows errors on non-Windows,
-        // so test the string matching logic directly.
-        let windows_errors = [
-            "Access is denied",
-            "sharing violation",
-            "lock",
-            "EWOULDBLOCK",
-            "EBUSY",
-            "EPERM",
-        ];
-        for err_msg in &windows_errors {
-            assert!(
-                err_msg.contains("lock")
-                    || err_msg.contains("EWOULDBLOCK")
-                    || err_msg.contains("EBUSY")
-                    || err_msg.contains("EPERM")
-                    || err_msg.contains("Access is denied")
-                    || err_msg.contains("sharing violation"),
-                "Lock detection should match: {err_msg}"
-            );
-        }
-    }
-
-    // dedup key includes english
-
-    #[test]
-    fn check_anchor_same_term_different_english() {
-        // Same surface form but different english anchors should produce
-        // different outcomes — tests that dedup key must be (found, english).
-        let painting_result = Ok("This painting uses rendering technique".to_string());
-        let gpu_result = Ok("This is about GPU optimization".to_string());
-
-        // "渲染" with english "rendering" in painting context → confirmed
-        assert_eq!(
-            check_anchor("rendering", &painting_result),
-            TranslateOutcome::Confirmed
-        );
-        // "渲染" with english "rendering" in GPU context → rejected
-        assert_eq!(
-            check_anchor("rendering", &gpu_result),
-            TranslateOutcome::Rejected
-        );
-    }
-
-    // API call cap
-
-    #[test]
-    fn confirm_issues_respects_api_cap() {
-        // With max_api_calls=1 and no cache, only the first term gets a
-        // network call; subsequent terms get Unknown (fail-open).
-        let mut issues = vec![
-            {
-                let mut i = Issue::new(
-                    0,
-                    6,
-                    "渲染",
-                    vec!["算繪".into()],
-                    crate::rules::ruleset::IssueType::CrossStrait,
-                    Severity::Warning,
-                )
-                .with_english("rendering");
-                i.line = 1;
-                i.col = 1;
-                i
-            },
-            {
-                let mut i = Issue::new(
-                    6,
-                    6,
-                    "實例",
-                    vec!["實體".into()],
-                    crate::rules::ruleset::IssueType::CrossStrait,
-                    Severity::Warning,
-                )
-                .with_english("instance");
-                i.line = 1;
-                i.col = 3;
-                i
-            },
-        ];
-
-        let config = ConfirmConfig {
-            request_delay: Duration::ZERO,
-            downgrade_unconfirmed: true,
-            max_api_calls: 1, // allow 1 API call, cap the rest
-        };
-        let result = confirm_issues(&mut issues, "渲染實例的測試文字", &config, None);
-
-        // First term: 1 API call (network error in test env → Unknown).
-        // Second term: API-capped → Unknown without network call.
-        // Both severities preserved (fail-open).
-        assert_eq!(result.api_calls, 1);
-        assert!(result.unknown >= 1, "capped term should be Unknown");
-        assert_eq!(
-            issues[1].severity,
-            Severity::Warning,
-            "capped term severity preserved"
+    fn calibrate_stopword_only_anchor_yields_none() {
+        // "if and only if" — all stopwords.  Should not produce a false match.
+        let _issues = vec![Issue::new(
+            0,
+            6,
+            "當且僅當",
+            vec!["若且唯若".to_string()],
+            crate::rules::ruleset::IssueType::CrossStrait,
+            crate::rules::ruleset::Severity::Warning,
+        )
+        .with_english("if and only if")];
+        // We can't call the real API in unit tests, but we can verify the
+        // content_anchor_words logic that gates the match.
+        let anchors = content_anchor_words("if and only if");
+        assert!(
+            anchors.is_empty(),
+            "stopword-only anchor should produce no content words"
         );
     }
 }

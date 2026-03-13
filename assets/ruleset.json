@@ -816,7 +816,8 @@
       "to": ["記憶體"],
       "type": "cross_strait",
       "context": "區分 RAM (記憶體) 與 ROM/Flash (儲存空間)",
-      "english": "memory (RAM)"
+      "english": "memory (RAM)",
+      "exceptions": ["海內存知己"]
     },
     {
       "from": "內存分配",

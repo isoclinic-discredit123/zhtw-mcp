@@ -34,8 +34,9 @@ pub(crate) const DEFAULT_SAMPLING_TIMEOUT: Duration = Duration::from_secs(5);
 /// Default per-invocation budget for sampling calls.
 pub(crate) const DEFAULT_SAMPLING_BUDGET: usize = 5;
 
-/// Term descriptor for bulk anchor-confirmation (32.6).
+/// Term descriptor for bulk anchor-confirmation via sampling.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct BulkConfirmTerm {
     /// The cross-strait term found in the text (e.g. "渲染").
     pub found: String,
@@ -178,6 +179,7 @@ impl<'a> SamplingBridge<'a> {
     ///
     /// Returns `None` on timeout, error, budget exhaustion, or parse failure.
     /// Consumes 1 budget unit regardless of term count.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn sample_bulk_confirm(
         &mut self,
         terms: &[BulkConfirmTerm],
@@ -363,9 +365,37 @@ fn find_matching_suggestion(text: &str, suggestions: &[String]) -> Option<String
 
 /// Whether an issue is eligible for sampling disambiguation.
 ///
-/// Eligible if the issue has an english field AND either multiple suggestions
-/// or context_clues (indicating ambiguity that an LLM could help resolve).
-pub(crate) fn is_sampling_eligible(issue: &Issue) -> bool {
+/// When anchor_match is set by calibration:
+/// - `Some(true)` with single suggestion = calibration confirmed the match AND
+///   the replacement is unambiguous → skip sampling.
+/// - `Some(true)` with multiple suggestions = calibration confirms the issue
+///   exists but the LLM still needs to pick the right suggestion → eligible.
+/// - `Some(false)` = calibration found no anchor → KEEP eligible for sampling
+///   so the LLM can provide a second opinion on the potential false positive.
+/// - `None` = no calibration signal, fall back to heuristic.
+///
+/// Without calibration, eligible if english + (multi-suggestion or context_clues).
+pub(crate) fn is_sampling_eligible(
+    issue: &Issue,
+    _ambiguous_threshold: f32,
+    _decided_threshold: f32,
+) -> bool {
+    if issue.anchor_match == Some(true) && issue.suggestions.len() <= 1 {
+        // Calibration confirmed the match and there's only one suggestion —
+        // no ambiguity for the LLM to resolve.
+        return false;
+    }
+    if issue.anchor_match == Some(false) {
+        // Calibration found no anchor — potential false positive.  The LLM
+        // should get a second opinion regardless of suggestion count.
+        // For single-suggestion issues, the LLM can still downgrade severity
+        // to Info (rejecting the match), which is a meaningful outcome.
+        // This does spend from the sampling budget — acceptable tradeoff
+        // since unconfirmed issues are the highest-value disambiguation targets.
+        return issue.english.is_some();
+    }
+    // anchor_match == None or Some(true) with multiple suggestions:
+    // eligible if english + (multi-suggestion or context_clues).
     issue.english.is_some() && (issue.suggestions.len() > 1 || issue.context_clues.is_some())
 }
 
@@ -377,12 +407,14 @@ pub(crate) fn refine_issues_with_sampling(
     issues: &mut [Issue],
     bridge: &mut SamplingBridge<'_>,
     text: &str,
+    ambiguous_threshold: f32,
+    decided_threshold: f32,
 ) {
     for issue in issues.iter_mut() {
         if !bridge.has_budget() {
             break;
         }
-        if !is_sampling_eligible(issue) {
+        if !is_sampling_eligible(issue, ambiguous_threshold, decided_threshold) {
             continue;
         }
 
@@ -465,21 +497,21 @@ mod tests {
     #[test]
     fn eligible_confusable_with_english_multiple_suggestions() {
         let issue = make_confusable_issue("並行", vec!["平行", "並行"], "parallelism");
-        assert!(is_sampling_eligible(&issue));
+        assert!(is_sampling_eligible(&issue, 0.3, 0.8));
     }
 
     #[test]
     fn eligible_with_context_clues() {
         let mut issue = make_confusable_issue("程序", vec!["程式"], "program");
         issue.context_clues = Some(vec!["編寫".into(), "執行".into()]);
-        assert!(is_sampling_eligible(&issue));
+        assert!(is_sampling_eligible(&issue, 0.3, 0.8));
     }
 
     #[test]
     fn not_eligible_without_english() {
         let mut issue = make_confusable_issue("軟件", vec!["軟體"], "software");
         issue.english = None;
-        assert!(!is_sampling_eligible(&issue));
+        assert!(!is_sampling_eligible(&issue, 0.3, 0.8));
     }
 
     #[test]
@@ -498,7 +530,52 @@ mod tests {
             i.col = 1;
             i
         };
-        assert!(!is_sampling_eligible(&issue));
+        assert!(!is_sampling_eligible(&issue, 0.3, 0.8));
+    }
+
+    #[test]
+    fn not_eligible_when_calibrated_true() {
+        // anchor_match = Some(true) → calibration confirmed → skip sampling.
+        let mut issue = make_confusable_issue("渲染", vec!["算繪"], "rendering");
+        issue.anchor_match = Some(true);
+        assert!(!is_sampling_eligible(&issue, 0.3, 0.8));
+    }
+
+    #[test]
+    fn eligible_when_calibrated_true_multi_suggestion() {
+        // anchor_match = Some(true) but multiple suggestions → LLM still
+        // needs to pick which suggestion is correct.
+        let mut issue = make_confusable_issue("並行", vec!["平行", "並行"], "parallelism");
+        issue.anchor_match = Some(true);
+        assert!(is_sampling_eligible(&issue, 0.3, 0.8));
+    }
+
+    #[test]
+    fn eligible_when_calibrated_false() {
+        // anchor_match = Some(false) → calibration found no anchor → LLM should
+        // get a second opinion, so sampling remains eligible.
+        let mut issue = make_confusable_issue("渲染", vec!["算繪", "彩現"], "rendering");
+        issue.anchor_match = Some(false);
+        assert!(is_sampling_eligible(&issue, 0.3, 0.8));
+    }
+
+    #[test]
+    fn eligible_when_calibrated_false_single_suggestion() {
+        // anchor_match = Some(false) with single suggestion → still eligible.
+        // The LLM should weigh in on potential false positives regardless of
+        // suggestion count.
+        let mut issue = make_confusable_issue("渲染", vec!["算繪"], "rendering");
+        issue.anchor_match = Some(false);
+        assert!(is_sampling_eligible(&issue, 0.3, 0.8));
+    }
+
+    #[test]
+    fn eligible_when_no_calibration() {
+        // When anchor_match is None, fall back to heuristic:
+        // eligible if english + (multi-suggestion or context_clues).
+        let issue = make_confusable_issue("渲染", vec!["算繪", "彩現"], "rendering");
+        assert!(issue.anchor_match.is_none());
+        assert!(is_sampling_eligible(&issue, 0.3, 0.8));
     }
 
     #[test]
@@ -759,7 +836,7 @@ mod tests {
         let mut writer = Cursor::new(Vec::new());
         let mut bridge = SamplingBridge::new(&mut writer, &rx, Duration::from_secs(5), 5);
 
-        refine_issues_with_sampling(&mut issues, &mut bridge, "這個算法支持並行計算");
+        refine_issues_with_sampling(&mut issues, &mut bridge, "這個算法支持並行計算", 0.3, 0.8);
 
         assert_eq!(issues[0].suggestions[0], "平行"); // promoted to front
         assert!(issues[0]
@@ -920,122 +997,8 @@ mod tests {
         assert_eq!(bridge.used(), 0);
     }
 
-    #[test]
-    fn confirm_with_sampling_applies_bulk_results() {
-        use crate::engine::translate::{confirm_issues_with_sampling, ConfirmConfig};
-
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let mut issues = vec![
-            {
-                let mut i = Issue::new(
-                    0,
-                    6,
-                    "渲染",
-                    vec!["算繪".into()],
-                    IssueType::CrossStrait,
-                    Severity::Warning,
-                )
-                .with_english("rendering");
-                i.line = 1;
-                i.col = 1;
-                i
-            },
-            {
-                let mut i = Issue::new(
-                    12,
-                    6,
-                    "實例",
-                    vec!["實體".into()],
-                    IssueType::CrossStrait,
-                    Severity::Warning,
-                )
-                .with_english("instance");
-                i.line = 1;
-                i.col = 5;
-                i
-            },
-        ];
-
-        let expected_id = next_expected_id();
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": expected_id,
-            "result": {
-                "role": "assistant",
-                "content": {
-                    "type": "text",
-                    "text": "{\"0\": true, \"1\": false}"
-                }
-            }
-        });
-
-        let (tx, rx) = mpsc::channel();
-        tx.send(StdinMsg::Line(response.to_string())).unwrap();
-
-        let mut writer = Cursor::new(Vec::new());
-        let mut bridge = SamplingBridge::new(&mut writer, &rx, Duration::from_secs(5), 1);
-
-        let config = ConfirmConfig {
-            request_delay: Duration::ZERO,
-            downgrade_unconfirmed: true,
-            max_api_calls: 10,
-        };
-        let text = "GPU渲染管線需要建立一個實例才能運作";
-        let result = confirm_issues_with_sampling(&mut issues, text, &mut bridge, &config);
-
-        assert_eq!(result.confirmed, 1);
-        assert_eq!(result.unconfirmed, 1);
-        assert_eq!(result.api_calls, 1);
-        assert!(
-            !result.transport_failed,
-            "successful sampling should not signal transport failure"
-        );
-        assert_eq!(issues[0].severity, Severity::Warning); // confirmed → keep
-        assert_eq!(issues[1].severity, Severity::Info); // rejected → downgrade
-    }
-
-    #[test]
-    fn confirm_with_sampling_fails_open_on_timeout() {
-        use crate::engine::translate::{confirm_issues_with_sampling, ConfirmConfig};
-
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let mut issues = vec![{
-            let mut i = Issue::new(
-                0,
-                6,
-                "渲染",
-                vec!["算繪".into()],
-                IssueType::CrossStrait,
-                Severity::Warning,
-            )
-            .with_english("rendering");
-            i.line = 1;
-            i.col = 1;
-            i
-        }];
-
-        let (_tx, rx) = mpsc::channel::<StdinMsg>();
-        let mut writer = Cursor::new(Vec::new());
-        let mut bridge = SamplingBridge::new(&mut writer, &rx, Duration::from_millis(50), 1);
-
-        let config = ConfirmConfig {
-            request_delay: Duration::ZERO,
-            downgrade_unconfirmed: true,
-            max_api_calls: 10,
-        };
-        let result = confirm_issues_with_sampling(&mut issues, "GPU渲染管線", &mut bridge, &config);
-
-        assert_eq!(result.unknown, 1);
-        assert_eq!(result.confirmed, 0);
-        assert_eq!(result.unconfirmed, 0);
-        assert!(
-            result.transport_failed,
-            "timeout should signal transport failure"
-        );
-        assert_eq!(issues[0].severity, Severity::Warning); // fail-open
-    }
+    // Tests for confirm_issues_with_sampling removed — old anchor confirmation
+    // system replaced by calibrate_issues() in translate.rs.
 
     #[test]
     fn refine_issues_preserves_severity_on_timeout() {
@@ -1053,7 +1016,7 @@ mod tests {
         let mut writer = Cursor::new(Vec::new());
         let mut bridge = SamplingBridge::new(&mut writer, &rx, Duration::from_millis(10), 5);
 
-        refine_issues_with_sampling(&mut issues, &mut bridge, "context");
+        refine_issues_with_sampling(&mut issues, &mut bridge, "context", 0.3, 0.8);
 
         // Severity must be unchanged; only the context annotation is added.
         assert_eq!(issues[0].severity, original_severity);

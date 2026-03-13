@@ -72,8 +72,6 @@ impl S2TConverter {
 
     /// Convert Simplified Chinese text to Traditional Chinese (Taiwan variant).
     pub fn convert(&self, input: &str) -> String {
-        // Phase 1+2: phrase substitution + character fallback in a single pass.
-        //
         // Scan for phrase matches. Between matches (and after the last match),
         // apply character-level conversion.
         let mut out = String::with_capacity(input.len());
@@ -100,7 +98,7 @@ impl S2TConverter {
             out.push(self.convert_char(ch));
         }
 
-        // Phase 3: TW variant normalization.
+        // TW variant normalization.
         if self.tw_variant_map.is_empty() {
             return out;
         }

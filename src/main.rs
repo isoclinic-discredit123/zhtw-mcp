@@ -81,7 +81,7 @@ fn main() -> Result<()> {
     let mut update_baseline = false;
     let mut diff_from: Option<String> = None;
     #[cfg(feature = "translate")]
-    let mut confirm = false;
+    let mut verify = false;
     let mut setup_host: Option<String> = None;
     let mut pack_cmd: Option<String> = None;
     let mut pack_arg: Option<String> = None;
@@ -193,12 +193,12 @@ fn main() -> Result<()> {
                             );
                         }
                         #[cfg(feature = "translate")]
-                        "--confirm" => {
-                            confirm = true;
+                        "--verify" => {
+                            verify = true;
                         }
                         #[cfg(not(feature = "translate"))]
-                        "--confirm" => {
-                            anyhow::bail!("--confirm requires the 'translate' feature (rebuild without --no-default-features)");
+                        "--verify" => {
+                            anyhow::bail!("--verify requires the 'translate' feature (rebuild without --no-default-features)");
                         }
                         _ => {
                             lint_files.push(args[i].clone());
@@ -366,7 +366,7 @@ fn main() -> Result<()> {
             update_baseline,
             diff_from: diff_from.as_deref(),
             #[cfg(feature = "translate")]
-            confirm,
+            verify,
         });
     }
 
@@ -434,7 +434,7 @@ struct LintBatchParams<'a> {
     update_baseline: bool,
     diff_from: Option<&'a str>,
     #[cfg(feature = "translate")]
-    confirm: bool,
+    verify: bool,
 }
 
 fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
@@ -615,10 +615,10 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             issues
         };
 
-        // --confirm: anchor-confirm issues via Google Translate.
+        // --verify: calibrate issues via Google Translate.
         #[cfg(feature = "translate")]
-        let report_issues = if params.confirm {
-            let confirm_text = if has_text_changes && !params.dry_run {
+        let report_issues = if params.verify {
+            let calibrate_text = if has_text_changes && !params.dry_run {
                 fix_result
                     .as_ref()
                     .map_or(text.as_str(), |f| f.text.as_str())
@@ -626,23 +626,11 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                 &text
             };
             let mut issues_mut = report_issues;
-            let config = zhtw_mcp::engine::translate::ConfirmConfig::default();
-            let cache = zhtw_mcp::engine::translate::TranslationCache::open().ok();
-            let result = zhtw_mcp::engine::translate::confirm_issues(
-                &mut issues_mut,
-                confirm_text,
-                &config,
-                cache.as_ref(),
-            );
+            let result =
+                zhtw_mcp::engine::translate::calibrate_issues(calibrate_text, &mut issues_mut);
             eprintln!(
-                "{}  confirm: {} confirmed, {} unconfirmed, {} unknown, {} API calls, {} cache hits{}",
-                c.dim,
-                result.confirmed,
-                result.unconfirmed,
-                result.unknown,
-                result.api_calls,
-                result.cache_hits,
-                c.reset,
+                "{}  verify: {} matched, {} unmatched, {} no_english, api_ok={}{}",
+                c.dim, result.matched, result.unmatched, result.no_english, result.api_ok, c.reset,
             );
             issues_mut
         } else {
@@ -727,8 +715,13 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                         let rule_str = serde_json::to_string(&issue.rule_type).unwrap_or_default();
                         let rule_name = rule_str.trim_matches('"');
                         let suggestions = issue.suggestions.join(", ");
+                        let verify_tag = match issue.anchor_match {
+                            Some(true) => " [verified]",
+                            Some(false) => " [unverified]",
+                            None => "",
+                        };
                         eprintln!(
-                            "{prefix}{}:{}: {}{}{} {}[{}]{} '{}{}{}' -> {}",
+                            "{prefix}{}:{}: {}{}{} {}[{}]{} '{}{}{}' -> {}{}",
                             issue.line,
                             issue.col,
                             sev_color,
@@ -741,6 +734,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                             issue.found,
                             c.reset,
                             suggestions,
+                            verify_tag,
                         );
                         if params.explain {
                             if let Some(ctx) = &issue.context {
@@ -1064,7 +1058,7 @@ fn run_convert(
         text = fix_result.text;
     }
 
-    // Step 4: Final confirmation via Google Translate (if feature enabled).
+    // Step 4: Final verification via Google Translate (if feature enabled).
     #[cfg(feature = "translate")]
     {
         let excluded =
@@ -1077,26 +1071,25 @@ fn run_convert(
         );
         let mut remaining = scan_out.issues;
         if !remaining.is_empty() {
-            let config = zhtw_mcp::engine::translate::ConfirmConfig::default();
-            let cache = zhtw_mcp::engine::translate::TranslationCache::open().ok();
-            let cr = zhtw_mcp::engine::translate::confirm_issues(
-                &mut remaining,
-                &text,
-                &config,
-                cache.as_ref(),
-            );
-            let unconfirmed_count = remaining
-                .iter()
-                .filter(|i| i.severity != zhtw_mcp::rules::ruleset::Severity::Info)
-                .count();
+            let cr = zhtw_mcp::engine::translate::calibrate_issues(&text, &mut remaining);
             eprintln!(
-                "convert: confirm — {} confirmed, {} unconfirmed, {} unknown, {} API calls, {} cache hits",
-                cr.confirmed, cr.unconfirmed, cr.unknown, cr.api_calls, cr.cache_hits,
+                "convert: verify — {} matched, {} unmatched, {} no_english, api_ok={}",
+                cr.matched, cr.unmatched, cr.no_english, cr.api_ok,
             );
-            if unconfirmed_count > 0 {
+            let rejected_count = remaining
+                .iter()
+                .filter(|i| i.anchor_match == Some(false))
+                .count();
+            let no_signal_count = remaining
+                .iter()
+                .filter(|i| i.anchor_match.is_none() && i.english.is_some())
+                .count();
+            if rejected_count + no_signal_count > 0 {
                 eprintln!(
-                    "convert: {} residual issues (unconfirmed by Google Translate)",
-                    unconfirmed_count,
+                    "convert: {} residual issues ({} unconfirmed, {} no signal)",
+                    rejected_count + no_signal_count,
+                    rejected_count,
+                    no_signal_count,
                 );
             }
         }
