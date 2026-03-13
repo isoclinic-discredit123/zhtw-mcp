@@ -290,7 +290,7 @@ fn already_correct_form(text: &str, match_start: usize, rule: &SpellingRule) -> 
 /// compatibility, or bopomofo).  Excludes CJK Symbols/Punctuation
 /// (U+3000..U+303F) to avoid false positives when full-width marks sit
 /// next to half-width punctuation.
-fn is_cjk_ideograph(ch: char) -> bool {
+pub(crate) fn is_cjk_ideograph(ch: char) -> bool {
     matches!(ch,
         '\u{3100}'..='\u{312F}' |   // Bopomofo
         '\u{3400}'..='\u{4DBF}' |   // CJK Extension A

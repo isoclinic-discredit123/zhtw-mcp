@@ -19,7 +19,7 @@
 // of common function words and particles.
 // Freq weights: rule terms=1, general vocab=5, stop words=10.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A lightweight MMSEG word segmenter.
 ///
@@ -31,6 +31,11 @@ pub struct Segmenter {
     /// Computed at construction time so long entries (e.g. country names)
     /// are reachable without a hardcoded constant.
     max_word_len: usize,
+    /// Rule 'from' terms — cn-style patterns that the AC scanner is trying
+    /// to detect.  Excluded from word-boundary straddle checks so that one
+    /// rule's pattern doesn't suppress another rule's match (e.g. '文件內容'
+    /// straddling the right edge of '讀文件').
+    rule_from_terms: HashSet<String>,
 }
 
 /// A single token produced by segmentation.
@@ -56,7 +61,11 @@ impl Segmenter {
             .map(|w| (w, 1u32))
             .collect();
         let max_word_len = dict.keys().map(|w| w.chars().count()).max().unwrap_or(1);
-        Self { dict, max_word_len }
+        Self {
+            dict,
+            max_word_len,
+            rule_from_terms: HashSet::new(),
+        }
     }
 
     /// Build a segmenter from spelling rule vocabulary.
@@ -66,10 +75,12 @@ impl Segmenter {
     /// (freq=10, overriding any lower value from rules).
     pub fn from_rules(rules: &[crate::rules::ruleset::SpellingRule]) -> Self {
         let mut dict: HashMap<String, u32> = HashMap::new();
+        let mut rule_from_terms: HashSet<String> = HashSet::new();
 
         // Extract terms from rules (from, to, and context_clues).
         for rule in rules {
             if !rule.disabled {
+                rule_from_terms.insert(rule.from.clone());
                 dict.entry(rule.from.clone()).or_insert(1);
                 for to in &rule.to {
                     if !to.is_empty() {
@@ -110,7 +121,11 @@ impl Segmenter {
         }
 
         let max_word_len = dict.keys().map(|w| w.chars().count()).max().unwrap_or(1);
-        Self { dict, max_word_len }
+        Self {
+            dict,
+            max_word_len,
+            rule_from_terms,
+        }
     }
 
     /// Return all candidate ChunkWord values that start at pos.
@@ -286,6 +301,73 @@ impl Segmenter {
     pub fn dict_size(&self) -> usize {
         self.dict.len()
     }
+
+    /// Check if a known dictionary word straddles the given byte boundary.
+    ///
+    /// Returns `true` if there exists a dictionary entry of length >= 2 chars
+    /// that starts before `boundary` and ends after it.  This catches false
+    /// AC matches where the pattern spans two distinct words — e.g. "積分"
+    /// inside "累積分佈" (累積 + 分佈).
+    ///
+    /// Rule 'from' terms are excluded: they are cn-style patterns, not
+    /// legitimate word boundaries, so one rule's pattern must not suppress
+    /// another rule's match (e.g. '文件內容' must not suppress '讀文件').
+    ///
+    /// Non-CJK characters act as natural word boundaries.
+    ///
+    /// Cost: O(L^2) dictionary lookups where L = max_word_len (typically <= 10).
+    pub fn word_straddles_boundary(&self, text: &str, boundary: usize) -> bool {
+        use super::scan::is_cjk_ideograph;
+
+        if boundary > text.len() || !text.is_char_boundary(boundary) {
+            return false;
+        }
+
+        let max_back = self.max_word_len.saturating_sub(1);
+
+        // Collect up to max_back start positions before the boundary on the
+        // stack.  Buffer must be >= max_word_len - 1; assert guards against
+        // silent truncation if the dictionary grows unusually long entries.
+        // Current max CJK-only term is ~10 chars.
+        const BUF: usize = 32;
+        let mut starts = [0usize; BUF];
+        let mut n_starts = 0;
+        let mut pos = boundary;
+        for _ in 0..max_back.min(starts.len()) {
+            if pos == 0 {
+                break;
+            }
+            pos = text.floor_char_boundary(pos - 1);
+            let ch = text[pos..].chars().next().unwrap();
+            if !is_cjk_ideograph(ch) {
+                break;
+            }
+            starts[n_starts] = pos;
+            n_starts += 1;
+        }
+
+        // For each start, extend past the boundary looking for dict words.
+        for (i, &start) in starts[..n_starts].iter().enumerate() {
+            let mut end = boundary;
+            let chars_before = i + 1; // each backward step is exactly one char
+            for _ in 1..=self.max_word_len.saturating_sub(chars_before) {
+                if end >= text.len() {
+                    break;
+                }
+                let ch = text[end..].chars().next().unwrap();
+                if !is_cjk_ideograph(ch) {
+                    break;
+                }
+                end += ch.len_utf8();
+                let candidate = &text[start..end];
+                if self.dict.contains_key(candidate) && !self.rule_from_terms.contains(candidate) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
 }
 
 /// Check if clue is a character-aligned substring of token, but not equal
@@ -430,6 +512,9 @@ static GENERAL_VOCAB: &[&str] = &[
     "例如", "另外", "此外", "然而", "總之", "因此", "根據", "透過", "對於", "關於", "隨著", "除了",
     "包括", "針對", "藉由", "依據", "即使", "無論", "否則", "同樣", "尤其", "反而", "首先", "其次",
     "最後", "進而", "從而",
+    // Academic / technical prose (word-boundary disambiguation)
+    "累積", "引導", "分佈", "序列", "函數", "變數", "模型", "估計", "觀測", "假設", "推導", "證明",
+    "收斂", "機率", "隨機", "樣本", "頻率", "密度", "偏差", "變異",
 ];
 
 /// Common Chinese function words and particles used to help segmentation.
@@ -910,5 +995,55 @@ mod tests {
         // Rule term "設計" inserted first with freq=1; general vocab uses
         // or_insert(5) which does NOT overwrite the existing freq=1.
         assert_eq!(seg.dict.get("設計"), Some(&1));
+    }
+
+    #[test]
+    fn word_straddles_boundary_detects_cross_word_match() {
+        // "累積" + "分佈" are distinct words.  An AC match for "積分"
+        // starting at the 積 in 累積分佈 straddles a word boundary.
+        let seg = Segmenter::new(
+            ["累積", "分佈", "排程", "序列", "引導"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+
+        let text = "累積分佈函數";
+        // "積分" would start at byte offset of 積 (=3 in UTF-8 for 累).
+        let boundary = "累".len(); // left edge of would-be "積分" match
+        assert!(
+            seg.word_straddles_boundary(text, boundary),
+            "累積 should straddle the boundary at 積"
+        );
+
+        let text2 = "排程序列";
+        let boundary2 = "排".len(); // left edge of would-be "程序" match
+        assert!(
+            seg.word_straddles_boundary(text2, boundary2),
+            "排程 should straddle the boundary at 程"
+        );
+
+        let text3 = "引導出平滑的";
+        let boundary3 = "引".len(); // left edge of would-be "導出" match
+        assert!(
+            seg.word_straddles_boundary(text3, boundary3),
+            "引導 should straddle the boundary at 導"
+        );
+    }
+
+    #[test]
+    fn word_straddles_boundary_allows_real_words() {
+        // When "積分" stands alone (e.g. "會員積分兌換"), no straddling.
+        let seg = Segmenter::new(["會員", "兌換"].iter().map(|s| s.to_string()));
+        let text = "會員積分兌換";
+        let boundary = "會員".len(); // left edge of "積分"
+        assert!(
+            !seg.word_straddles_boundary(text, boundary),
+            "no dict word should straddle between 會員 and 積分"
+        );
+        let boundary_right = "會員積分".len(); // right edge of "積分"
+        assert!(
+            !seg.word_straddles_boundary(text, boundary_right),
+            "no dict word should straddle between 積分 and 兌換"
+        );
     }
 }

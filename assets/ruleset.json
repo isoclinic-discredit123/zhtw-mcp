@@ -2379,6 +2379,7 @@
       "context": "限程式設計語境",
       "english": "object",
       "context_clues": ["類別", "屬性", "方法", "繼承", "封裝", "多型", "實例", "程式碼", "代碼", "介面", "函式"],
+      "negative_context_clues": ["批評"],
       "exceptions": ["研究對象", "服務對象", "目標對象"]
     },
     {
@@ -2436,7 +2437,10 @@
       "from": "局部",
       "to": ["區域性"],
       "type": "cross_strait",
-      "english": "local"
+      "context": "限程式設計語境 (local variable/scope)。「局部」(partial/local area) 為標準 tw 用法",
+      "english": "local",
+      "context_clues": ["變數", "變量", "函式", "函數", "local", "區域", "全域"],
+      "negative_context_clues": ["局部細節", "局部最", "局部地區", "局部區域"]
     },
     {
       "from": "局部對象",
@@ -3259,7 +3263,9 @@
       "from": "文件內容",
       "to": ["檔案內容"],
       "type": "cross_strait",
-      "english": "file content"
+      "context": "限檔案 I/O 語境。「文件內容」(document content) 為標準 tw 用法",
+      "english": "file content",
+      "context_clues": ["檔案", "路徑", "I/O", "磁碟", "目錄", "open", "read", "write", "讀取", "寫入"]
     },
     {
       "from": "文件名",
@@ -4369,6 +4375,7 @@
       "context": "限程式設計語境",
       "english": "exception",
       "context_clues": ["拋出", "捕獲", "處理", "程式碼", "代碼", "函式", "函數", "方法", "類別", "除錯", "偵錯"],
+      "negative_context_clues": ["偵測", "檢測", "異常值", "統計", "分佈"],
       "exceptions": ["異常情況"]
     },
     {
@@ -4801,7 +4808,9 @@
       "from": "積分",
       "to": ["點數", "分數", "紅利"],
       "type": "cross_strait",
-      "english": "points/credits"
+      "context": "限商業語境 (loyalty points)。數學「積分」(integral) 為標準 tw 用語",
+      "english": "points/credits",
+      "context_clues": ["會員", "紅利", "兌換", "獎勵", "消費", "回饋"]
     },
     {
       "from": "空分多址",
@@ -5851,12 +5860,6 @@
       "english": "debugger"
     },
     {
-      "from": "調適",
-      "to": ["除錯"],
-      "type": "cross_strait",
-      "english": "debug"
-    },
-    {
       "from": "證書",
       "to": ["憑證"],
       "type": "confusable",
@@ -5881,8 +5884,9 @@
       "from": "讀文件",
       "to": ["讀取檔案"],
       "type": "cross_strait",
-      "context": "compound: cn 文件 = tw 檔案 + cn 讀 = tw 讀取 (非口語語境)",
-      "english": "read file"
+      "context": "限檔案 I/O 語境。「閱讀文件」(read documentation) 不適用",
+      "english": "read file",
+      "context_clues": ["檔案", "路徑", "I/O", "磁碟", "目錄", "open", "read", "write"]
     },
     {
       "from": "變量",
@@ -6721,7 +6725,8 @@
       "type": "cross_strait",
       "context": "限程式設計語境。「類型」在日常語境表示「種類/範疇」為正確 tw 用法",
       "english": "type",
-      "context_clues": ["型別", "型態", "變數", "變量", "函式", "函數", "程式碼", "代碼", "泛型", "編譯", "宣告"]
+      "context_clues": ["型別", "型態", "變數", "變量", "函式", "函數", "程式碼", "代碼", "泛型", "編譯", "宣告"],
+      "negative_context_clues": ["哪些類型", "什麼類型", "各種類型", "某種類型", "這類型"]
     },
     {
       "from": "類定義",

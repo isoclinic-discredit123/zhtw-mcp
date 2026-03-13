@@ -147,6 +147,17 @@ impl Scanner {
             return;
         }
 
+        // Word-boundary check: skip if a known dictionary word straddles
+        // either edge of the AC match.  This catches false positives where
+        // the matched pattern spans two distinct words — e.g. "積分" found
+        // inside "累積分佈" (累積 + 分佈), "程序" inside "排程序列"
+        // (排程 + 序列), "導出" inside "引導出" (引導 + 出).
+        if self.segmenter.word_straddles_boundary(text, start)
+            || self.segmenter.word_straddles_boundary(text, end)
+        {
+            return;
+        }
+
         // Exception check: skip if the match falls inside an exception
         // phrase.  Applies to all rule types — variant, cross_strait,
         // typo, confusable, etc.  (e.g. chess term 下著 keeps 着; 分類
