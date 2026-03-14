@@ -643,3 +643,149 @@ fn cli_lint_compact_token_reduction_vs_human() {
         "compact should achieve ≥40% reduction vs human: human={human_len} compact={compact_len} reduction={reduction:.2}"
     );
 }
+
+// Grammar scanner: plumbing gate tests
+
+// Input that triggers grammar issues (A-not-A + 嗎 clash).
+const GRAMMAR_INPUT: &str = "你是不是學生嗎？";
+
+#[test]
+fn cli_lint_grammar_json_format() {
+    let output = run_lint_stdin(&["--format", "json"], GRAMMAR_INPUT);
+    assert!(
+        output.status.success(),
+        "grammar warnings should not cause non-zero exit"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let issues = parsed["issues"].as_array().unwrap();
+    let grammar = issues.iter().find(|i| i["rule_type"] == "grammar");
+    assert!(
+        grammar.is_some(),
+        "JSON should contain grammar issue: {stdout}"
+    );
+    let g = grammar.unwrap();
+    assert!(
+        g["found"].as_str().unwrap().contains("是不是"),
+        "found should contain pattern"
+    );
+    assert!(g["line"].as_u64().unwrap() > 0, "should have line number");
+}
+
+#[test]
+fn cli_lint_grammar_sarif_format() {
+    let output = run_lint_stdin(&["--format", "sarif"], GRAMMAR_INPUT);
+    assert!(
+        output.status.success(),
+        "grammar warnings should not cause non-zero exit"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid SARIF JSON");
+    let results = parsed["runs"][0]["results"].as_array().unwrap();
+    let grammar = results
+        .iter()
+        .find(|r| r["ruleId"].as_str().unwrap() == "zhtw-mcp/grammar");
+    assert!(
+        grammar.is_some(),
+        "SARIF should have zhtw-mcp/grammar ruleId: {stdout}"
+    );
+    let g = grammar.unwrap();
+    assert!(
+        g["locations"][0]["physicalLocation"]["region"]["startLine"]
+            .as_u64()
+            .is_some(),
+        "SARIF grammar result should have startLine"
+    );
+}
+
+#[test]
+fn cli_lint_grammar_compact_format() {
+    let output = run_lint_stdin(&["--format", "compact"], GRAMMAR_INPUT);
+    assert!(
+        output.status.success(),
+        "grammar warnings should not cause non-zero exit"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.is_empty(),
+        "compact output should be non-empty for grammar issue"
+    );
+    // Compact format: line:col:S:rule:found→suggestion
+    assert!(
+        stdout.contains(":grammar:"),
+        "compact should contain :grammar: rule field: {stdout}"
+    );
+}
+
+#[test]
+fn cli_lint_grammar_human_format() {
+    let output = run_lint_stdin(&["--format", "human"], GRAMMAR_INPUT);
+    assert!(
+        output.status.success(),
+        "grammar warnings should not cause non-zero exit"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[grammar]"),
+        "human output should show [grammar] bracketed rule type: {stderr}"
+    );
+}
+
+#[test]
+fn cli_lint_grammar_explain_format() {
+    let output = run_lint_stdin(&["--explain"], GRAMMAR_INPUT);
+    assert!(
+        output.status.success(),
+        "grammar warnings should not cause non-zero exit"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[grammar]"),
+        "explain should show [grammar] rule type: {stderr}"
+    );
+    assert!(
+        stderr.contains("A-not-A"),
+        "explain should show A-not-A explanation: {stderr}"
+    );
+}
+
+#[test]
+fn cli_lint_grammar_does_not_suppress_spelling() {
+    // Grammar issues run after overlap resolution, so a text with both
+    // a spelling issue and a grammar issue should report both.
+    // 軟件 triggers a spelling issue; 是不是…嗎 triggers grammar.
+    let input = "你是不是喜歡這個軟件嗎？";
+    let output = run_lint_stdin(&["--format", "json"], input);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let issues = parsed["issues"].as_array().unwrap();
+    let has_grammar = issues.iter().any(|i| i["rule_type"] == "grammar");
+    let has_spelling = issues
+        .iter()
+        .any(|i| i["rule_type"] == "cross_strait" || i["rule_type"] == "confusable");
+    assert!(has_grammar, "should have grammar issue: {stdout}");
+    assert!(
+        has_spelling,
+        "grammar should not suppress spelling issues: {stdout}"
+    );
+}
+
+#[test]
+fn cli_lint_grammar_disabled_in_ui_strings_profile() {
+    // UiStrings profile has grammar_checks: false.
+    // Use input with both a grammar pattern and a spelling issue (軟件)
+    // to prove grammar is selectively disabled, not that all issues vanish.
+    let input = "你是不是喜歡這個軟件嗎？";
+    let output = run_lint_stdin(&["--format", "json", "--profile", "ui_strings"], input);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let issues = parsed["issues"].as_array().unwrap();
+    assert!(
+        issues.iter().any(|i| i["rule_type"] != "grammar"),
+        "ui_strings should still produce non-grammar issues: {stdout}"
+    );
+    assert!(
+        !issues.iter().any(|i| i["rule_type"] == "grammar"),
+        "ui_strings profile should not produce grammar issues: {stdout}"
+    );
+}

@@ -38,6 +38,8 @@ pub struct ProfileConfig {
     pub ellipsis_normalization: bool,
     /// Range indicator style: true = en dash (–), false = wave dash (～).
     pub range_en_dash: bool,
+    /// Enable grammar checks (interlingual transfer, A-not-A + 嗎 clash).
+    pub grammar_checks: bool,
     /// Political stance sub-profile. Controls which PoliticalColoring rules fire.
     pub political_stance: PoliticalStance,
 }
@@ -66,9 +68,9 @@ impl Profile {
     /// Short description.
     pub fn description(self) -> &'static str {
         match self {
-            Profile::Default => "Base zh-TW rules: cross-strait vocabulary, political coloring, casing, basic punctuation",
-            Profile::StrictMoe => "Full MoE enforcement: all punctuation, character variants, 臺 normalization",
-            Profile::UiStrings => "Relaxed for software UI: half-width colon allowed, en dash for ranges, strict vocabulary",
+            Profile::Default => "Base zh-TW rules: cross-strait vocabulary, political coloring, casing, basic punctuation, grammar",
+            Profile::StrictMoe => "Full MoE enforcement: all punctuation, character variants, 臺 normalization, grammar",
+            Profile::UiStrings => "Relaxed for software UI: half-width colon allowed, en dash for ranges, strict vocabulary, no grammar",
         }
     }
 
@@ -85,6 +87,7 @@ impl Profile {
                 variant_normalization: false,
                 ellipsis_normalization: true,
                 range_en_dash: false,
+                grammar_checks: true,
                 political_stance: PoliticalStance::RocCentric,
             },
             Profile::StrictMoe => ProfileConfig {
@@ -97,6 +100,7 @@ impl Profile {
                 variant_normalization: true,
                 ellipsis_normalization: true,
                 range_en_dash: false,
+                grammar_checks: true,
                 political_stance: PoliticalStance::RocCentric,
             },
             Profile::UiStrings => ProfileConfig {
@@ -109,6 +113,7 @@ impl Profile {
                 variant_normalization: false,
                 ellipsis_normalization: true,
                 range_en_dash: true,
+                grammar_checks: false,
                 political_stance: PoliticalStance::RocCentric,
             },
         }
@@ -440,7 +445,7 @@ impl Issue {
     }
 }
 
-/// Issue classification — combines SpellingRule types and case rules.
+/// Issue classification — covers spelling, case, punctuation, and grammar checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueType {
@@ -451,6 +456,7 @@ pub enum IssueType {
     Case,
     Punctuation,
     Variant,
+    Grammar,
 }
 
 impl IssueType {
@@ -464,6 +470,7 @@ impl IssueType {
             IssueType::Case => 4,
             IssueType::Punctuation => 5,
             IssueType::Variant => 6,
+            IssueType::Grammar => 7,
         }
     }
 
@@ -477,6 +484,7 @@ impl IssueType {
             IssueType::Case => "case",
             IssueType::Punctuation => "punctuation",
             IssueType::Variant => "variant",
+            IssueType::Grammar => "grammar",
         }
     }
 }

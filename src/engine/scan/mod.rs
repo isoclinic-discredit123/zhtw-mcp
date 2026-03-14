@@ -9,9 +9,14 @@
 //      skip variant rules when text is Simplified.
 //   4. Aho-Corasick scan for case rules — check word boundaries and
 //      compare matched text against valid forms (term + alternatives).
+//   5. Punctuation, spacing, ellipsis, quote checks.
+//   6. Overlap resolution (longest match wins).
+//   7. Grammar checks (interlingual transfer, A-not-A + 嗎 clash) —
+//      run after overlap resolution to avoid suppressing narrower issues.
 
 mod case_rule;
 mod ellipsis;
+mod grammar;
 mod overlap;
 mod punctuation;
 mod quotes;
@@ -848,13 +853,19 @@ impl Scanner {
             self.scan_cn_curly_quotes(text, excluded, &mut issues);
             self.scan_spacing(text, excluded, &mut issues);
         }
-
         // Sort by offset, then by length (longer match first for same offset).
         issues.sort_by(|a, b| a.offset.cmp(&b.offset).then(b.length.cmp(&a.length)));
 
         // Remove overlapping issues: longer match wins; on tie, higher severity
         // wins. Handles both same-offset and cross-offset overlaps.
         resolve_overlaps(&mut issues);
+
+        // Grammar checks run AFTER overlap resolution so broad grammar spans
+        // (e.g. 是不是…嗎) do not suppress narrower spelling/case issues
+        // that happen to fall inside the grammar match range.
+        if cfg.grammar_checks {
+            grammar::scan_grammar(text, excluded, &mut issues);
+        }
 
         // Fix CN quotation mark pairing with depth-based nesting (2.4):
         // well-formed quotes use character-based depth tracking; misordered

@@ -136,6 +136,32 @@ impl Scanner {
                     if i > 0 && bytes[i - 1] == b']' {
                         continue;
                     }
+                    // Guard: definition-list colon — `: ` at the start of a line
+                    // (possibly indented) is Markdown structural markup.
+                    // Pattern: (BOF or \n)(spaces/tabs)*`: `.
+                    if i + 1 < len && bytes[i + 1] == b' ' {
+                        let line_start = if i == 0 {
+                            true
+                        } else {
+                            // Walk backwards over spaces/tabs to find \n or BOF.
+                            let mut j = i - 1;
+                            loop {
+                                if bytes[j] == b'\n' {
+                                    break true;
+                                }
+                                if bytes[j] != b' ' && bytes[j] != b'\t' {
+                                    break false;
+                                }
+                                if j == 0 {
+                                    break true; // BOF after only whitespace
+                                }
+                                j -= 1;
+                            }
+                        };
+                        if line_start {
+                            continue;
+                        }
+                    }
                     if !adjacent_cjk(text, i, true) && !adjacent_cjk(text, i + 1, false) {
                         continue;
                     }

@@ -788,10 +788,30 @@ fn build_explanation(issue: &Issue) -> Option<String> {
                 issue.suggestions.join(" / "),
             ));
         }
+        IssueType::Grammar => {
+            if let Some(ctx) = &issue.context {
+                parts.push(format!(
+                    "'{}' — {}. Suggested: {}.",
+                    issue.found,
+                    ctx,
+                    issue.suggestions.join(" / "),
+                ));
+            } else {
+                parts.push(format!(
+                    "'{}' is a grammatical issue; suggested: {}.",
+                    issue.found,
+                    issue.suggestions.join(" / "),
+                ));
+            }
+        }
     }
 
-    if let Some(ctx) = &issue.context {
-        parts.push(format!("Context: {ctx}"));
+    // Grammar issues already embed context in the main explanation;
+    // skip the shared Context: append to avoid duplication.
+    if issue.rule_type != IssueType::Grammar {
+        if let Some(ctx) = &issue.context {
+            parts.push(format!("Context: {ctx}"));
+        }
     }
 
     if parts.is_empty() {

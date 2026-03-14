@@ -4,6 +4,8 @@
 // tools/list, tools/call, resources/list, resources/read, prompts/list,
 // prompts/get.
 
+use std::string::FromUtf8Error;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -324,6 +326,148 @@ pub struct PromptContent {
 pub struct PromptGetResult {
     pub description: String,
     pub messages: Vec<PromptMessage>,
+}
+
+// Transport error types
+
+/// Structured transport error for distinguishing failure modes in the
+/// dispatch loop. Maps to specific JSON-RPC error codes:
+///   - Closed → graceful exit (break loop)
+///   - Parse → -32700 (PARSE_ERROR)
+///   - InvalidUtf8 → -32700 (PARSE_ERROR)
+///   - InvalidRequest → -32600 (INVALID_REQUEST)
+///   - Io → -32000 (server error) with log
+#[derive(Debug)]
+pub enum TransportError {
+    /// Underlying I/O failure (read/write error).
+    Io(std::io::Error),
+    /// Transport closed (EOF or channel dropped).
+    Closed,
+    /// Input is not valid JSON (malformed syntax).
+    Parse(serde_json::Error),
+    /// Input contains invalid UTF-8 sequences.
+    InvalidUtf8(FromUtf8Error),
+    /// Valid JSON but not a valid JSON-RPC request (missing method, wrong
+    /// version, response-shaped message, etc.).
+    InvalidRequest(String),
+}
+
+impl TransportError {
+    /// Whether this error represents a closed/EOF condition.
+    pub fn is_closed(&self) -> bool {
+        matches!(self, TransportError::Closed)
+    }
+
+    /// JSON-RPC error code for this transport error, if applicable.
+    /// Returns None for Closed (no error response should be sent).
+    pub fn error_code(&self) -> Option<i64> {
+        match self {
+            TransportError::Io(_) => Some(-32000),
+            TransportError::Closed => None,
+            TransportError::Parse(_) => Some(PARSE_ERROR),
+            TransportError::InvalidUtf8(_) => Some(PARSE_ERROR),
+            TransportError::InvalidRequest(_) => Some(INVALID_REQUEST),
+        }
+    }
+
+    /// Human-readable error message for JSON-RPC error responses.
+    pub fn error_message(&self) -> String {
+        match self {
+            TransportError::Io(e) => format!("transport I/O error: {e}"),
+            TransportError::Closed => "transport closed".into(),
+            TransportError::Parse(e) => format!("parse error: {e}"),
+            TransportError::InvalidUtf8(_) => {
+                "request contains malformed UTF-8 character(s)".into()
+            }
+            TransportError::InvalidRequest(msg) => format!("invalid request: {msg}"),
+        }
+    }
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportError::Io(e) => write!(f, "transport I/O: {e}"),
+            TransportError::Closed => write!(f, "transport closed"),
+            TransportError::Parse(e) => write!(f, "JSON parse: {e}"),
+            TransportError::InvalidUtf8(e) => write!(f, "invalid UTF-8: {e}"),
+            TransportError::InvalidRequest(msg) => write!(f, "invalid request: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for TransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TransportError::Io(e) => Some(e),
+            TransportError::Parse(e) => Some(e),
+            TransportError::InvalidUtf8(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for TransportError {
+    fn from(e: std::io::Error) -> Self {
+        TransportError::Io(e)
+    }
+}
+
+impl From<serde_json::Error> for TransportError {
+    fn from(e: serde_json::Error) -> Self {
+        TransportError::Parse(e)
+    }
+}
+
+impl From<FromUtf8Error> for TransportError {
+    fn from(e: FromUtf8Error) -> Self {
+        TransportError::InvalidUtf8(e)
+    }
+}
+
+impl TransportError {
+    /// Build a JSON-RPC error response for this transport error, if one
+    /// should be sent. Returns None for Closed (no response).
+    ///
+    /// Accepts an optional request id so that InvalidRequest errors (where
+    /// the JSON was valid enough to extract an id) can be correlated by
+    /// the client.
+    pub fn into_response(self, id: Option<RequestId>) -> Option<JsonRpcResponse> {
+        let code = self.error_code()?;
+        let message = self.error_message();
+        Some(JsonRpcResponse::error(id, code, message))
+    }
+}
+
+/// Parse a raw JSON line into a validated JsonRpcRequest.
+///
+/// Returns TransportError variants that preserve the distinction between
+/// malformed JSON (Parse → -32700) and valid-JSON-but-invalid-JSON-RPC
+/// (InvalidRequest → -32600).
+pub fn parse_jsonrpc_line(line: &str) -> Result<JsonRpcRequest, TransportError> {
+    // Step 1: parse as generic JSON.
+    let obj: serde_json::Value = serde_json::from_str(line).map_err(TransportError::Parse)?;
+
+    // Step 2: discard response-shaped messages (has result/error, no method).
+    if obj.is_object() && obj.get("method").is_none() {
+        return Err(TransportError::InvalidRequest(
+            "response-shaped message (no method field)".into(),
+        ));
+    }
+
+    // Step 3: convert to typed request.
+    let req: JsonRpcRequest =
+        serde_json::from_value(obj).map_err(|e| TransportError::InvalidRequest(e.to_string()))?;
+
+    // Step 4: validate JSON-RPC version.
+    if req.jsonrpc != JSONRPC_VERSION {
+        return Err(TransportError::InvalidRequest(format!(
+            "expected jsonrpc \"{JSONRPC_VERSION}\", got \"{}\"",
+            req.jsonrpc
+        )));
+    }
+
+    Ok(req)
 }
 
 // Protocol constants

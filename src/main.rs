@@ -712,8 +712,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                             zhtw_mcp::rules::ruleset::Severity::Info => c.cyan,
                         };
                         let sev = issue.severity.name();
-                        let rule_str = serde_json::to_string(&issue.rule_type).unwrap_or_default();
-                        let rule_name = rule_str.trim_matches('"');
+                        let rule_name = issue.rule_type.name();
                         let suggestions = issue.suggestions.join(", ");
                         let verify_tag = match issue.anchor_match {
                             Some(true) => " [verified]",
@@ -843,12 +842,8 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             }
             LintFormat::Sarif => {
                 for issue in &report_issues {
-                    let rule_id = format!(
-                        "zhtw-mcp/{}",
-                        serde_json::to_string(&issue.rule_type)
-                            .unwrap_or_default()
-                            .trim_matches('"')
-                    );
+                    let rule_name = issue.rule_type.name();
+                    let rule_id = format!("zhtw-mcp/{rule_name}");
                     let level = match issue.severity {
                         zhtw_mcp::rules::ruleset::Severity::Error => "error",
                         zhtw_mcp::rules::ruleset::Severity::Warning => "warning",
@@ -860,8 +855,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                         serde_json::json!({
                             "id": rule_id,
                             "shortDescription": {
-                                "text": format!("{} check", serde_json::to_string(&issue.rule_type)
-                                    .unwrap_or_default().trim_matches('"'))
+                                "text": format!("{rule_name} check")
                             }
                         })
                     });

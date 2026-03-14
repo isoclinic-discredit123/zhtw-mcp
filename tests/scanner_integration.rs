@@ -696,3 +696,188 @@ fn punct_decimal_number_untouched() {
     let issues = scanner.scan("圓周率是 3.14 左右").issues;
     assert!(issues.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Definition-list colon should not be flagged as half-width punctuation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn punct_definition_list_colon_skipped() {
+    use zhtw_mcp::engine::scan::ContentType;
+    use zhtw_mcp::rules::ruleset::IssueType;
+    let scanner = Scanner::new(vec![], vec![]);
+    // Markdown definition list: term on one line, `: definition` on the next.
+    let text = "尾端延遲\n: 以互補累積分佈函數描述延遲";
+    let output = scanner.scan_for_content_type(text, ContentType::Markdown, Profile::Default);
+    let colon_issues: Vec<_> = output
+        .issues
+        .iter()
+        .filter(|i| i.rule_type == IssueType::Punctuation && i.found == ":")
+        .collect();
+    assert!(
+        colon_issues.is_empty(),
+        "definition-list colon should not be flagged: {colon_issues:?}"
+    );
+}
+
+#[test]
+fn punct_definition_list_colon_indented_skipped() {
+    use zhtw_mcp::engine::scan::ContentType;
+    use zhtw_mcp::rules::ruleset::IssueType;
+    let scanner = Scanner::new(vec![], vec![]);
+    // Indented definition list (e.g. nested in blockquote or list).
+    let text = "術語\n  : 定義內容在此";
+    let output = scanner.scan_for_content_type(text, ContentType::Markdown, Profile::Default);
+    let colon_issues: Vec<_> = output
+        .issues
+        .iter()
+        .filter(|i| i.rule_type == IssueType::Punctuation && i.found == ":")
+        .collect();
+    assert!(
+        colon_issues.is_empty(),
+        "indented definition-list colon should not be flagged: {colon_issues:?}"
+    );
+}
+
+#[test]
+fn punct_colon_after_cjk_still_flagged() {
+    // A colon after CJK text (not at line start) should still be flagged.
+    let scanner = Scanner::new(vec![], vec![]);
+    let output = scanner.scan("原因: 這是一個測試");
+    let colon_issues: Vec<_> = output.issues.iter().filter(|i| i.found == ":").collect();
+    assert_eq!(
+        colon_issues.len(),
+        1,
+        "normal half-width colon should still be flagged"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Grammar scanner: integration through full Scanner pipeline
+// ---------------------------------------------------------------------------
+
+#[test]
+fn grammar_issues_coexist_with_spelling() {
+    // 軟件 triggers a cross-strait spelling rule; 是不是…嗎 triggers grammar.
+    // Both should appear in output since grammar runs after overlap resolution.
+    use zhtw_mcp::rules::ruleset::IssueType;
+    let rules = vec![spelling("軟件", &["軟體"])];
+    let scanner = Scanner::new(rules, vec![]);
+    let output = scanner.scan("你是不是喜歡這個軟件嗎？");
+    let has_spelling = output
+        .issues
+        .iter()
+        .any(|i| i.rule_type == IssueType::CrossStrait);
+    let has_grammar = output
+        .issues
+        .iter()
+        .any(|i| i.rule_type == IssueType::Grammar);
+    assert!(has_spelling, "should have spelling issue for 軟件");
+    assert!(has_grammar, "should have grammar issue for 是不是…嗎");
+}
+
+#[test]
+fn grammar_issues_have_line_col() {
+    use zhtw_mcp::rules::ruleset::IssueType;
+    let scanner = Scanner::new(vec![], vec![]);
+    // Two-line input: grammar issue on the second line.
+    let output = scanner.scan("第一行\n你是不是學生嗎？");
+    let grammar = output
+        .issues
+        .iter()
+        .find(|i| i.rule_type == IssueType::Grammar);
+    assert!(grammar.is_some(), "should produce grammar issue");
+    let g = grammar.unwrap();
+    // 是不是 starts at byte 10 (第一行\n = 9+1 bytes, then 你 = 3 bytes → offset 13).
+    // Line should be 2 (1-based), col should be 2 (UTF-16: 你 is 1 code unit → col 2).
+    assert_eq!(g.line, 2, "grammar issue should be on line 2");
+    assert_eq!(g.col, 2, "grammar issue should start at col 2 (after 你)");
+}
+
+#[test]
+fn grammar_disabled_in_ui_strings_profile() {
+    use zhtw_mcp::engine::scan::ContentType;
+    use zhtw_mcp::rules::ruleset::IssueType;
+    let scanner = Scanner::new(vec![], vec![]);
+    let text = "你是不是學生嗎？";
+    let output = scanner.scan_for_content_type(text, ContentType::Plain, Profile::UiStrings);
+    assert!(
+        !output
+            .issues
+            .iter()
+            .any(|i| i.rule_type == IssueType::Grammar),
+        "UiStrings profile should not produce grammar issues"
+    );
+}
+
+#[test]
+fn grammar_enabled_in_default_profile() {
+    use zhtw_mcp::engine::scan::ContentType;
+    use zhtw_mcp::rules::ruleset::IssueType;
+    let scanner = Scanner::new(vec![], vec![]);
+    let text = "你是不是學生嗎？";
+    let output = scanner.scan_for_content_type(text, ContentType::Plain, Profile::Default);
+    assert!(
+        output
+            .issues
+            .iter()
+            .any(|i| i.rule_type == IssueType::Grammar),
+        "Default profile should produce grammar issues"
+    );
+}
+
+#[test]
+fn grammar_excluded_in_markdown_code_block() {
+    use zhtw_mcp::engine::scan::ContentType;
+    use zhtw_mcp::rules::ruleset::IssueType;
+    let scanner = Scanner::new(vec![], vec![]);
+    let text = "```\n你是不是學生嗎？\n```";
+    let output = scanner.scan_for_content_type(text, ContentType::Markdown, Profile::Default);
+    assert!(
+        !output
+            .issues
+            .iter()
+            .any(|i| i.rule_type == IssueType::Grammar),
+        "Grammar issues inside code blocks should be excluded"
+    );
+}
+
+#[test]
+fn grammar_deterministic_sort_order() {
+    // 進行 triggers both dui_jinxing (對資料進行分析) and bureaucratic
+    // nominalization (進行分析) at overlapping offsets.  Verify grammar
+    // issues are sorted by offset (ascending), then by length (descending).
+    use zhtw_mcp::rules::ruleset::IssueType;
+    let scanner = Scanner::new(vec![], vec![]);
+    let output = scanner.scan("對資料進行分析");
+    let grammar: Vec<_> = output
+        .issues
+        .iter()
+        .filter(|i| i.rule_type == IssueType::Grammar)
+        .collect();
+    assert!(
+        grammar.len() >= 2,
+        "should have at least 2 grammar issues (dui_jinxing + bureaucratic)"
+    );
+    // Verify sort: offsets ascending; at same offset, longer span first.
+    for pair in grammar.windows(2) {
+        assert!(
+            pair[0].offset < pair[1].offset
+                || (pair[0].offset == pair[1].offset && pair[0].length >= pair[1].length),
+            "grammar issues not properly sorted: {:?} before {:?}",
+            (pair[0].offset, pair[0].length),
+            (pair[1].offset, pair[1].length),
+        );
+    }
+}
+
+#[test]
+fn grammar_clean_text_produces_no_issues() {
+    let scanner = Scanner::new(vec![], vec![]);
+    let output = scanner.scan("台灣是一個美麗的島嶼，有豐富的文化和美食。");
+    let has_grammar = output
+        .issues
+        .iter()
+        .any(|i| i.rule_type == zhtw_mcp::rules::ruleset::IssueType::Grammar);
+    assert!(!has_grammar, "clean text should not trigger grammar checks");
+}

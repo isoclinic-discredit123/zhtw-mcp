@@ -144,9 +144,9 @@ fn dispatch_async(server: &mut Server, req: &mut JsonRpcRequest) -> Option<JsonR
 }
 
 async fn send_async(writer: &mut tokio::io::Stdout, resp: &JsonRpcResponse) -> Result<()> {
-    let json = serde_json::to_string(resp)?;
-    writer.write_all(json.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
+    let mut buf = serde_json::to_string(resp)?;
+    buf.push('\n');
+    writer.write_all(buf.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
 }

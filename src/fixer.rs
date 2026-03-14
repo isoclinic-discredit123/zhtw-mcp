@@ -102,7 +102,22 @@ pub fn apply_fixes_with_context(
     // (scanner's resolve_overlaps guarantees this).  Iterate forward,
     // copying unchanged gaps and appending replacements.
     for issue in issues {
-        let end = issue.offset + issue.length;
+        let Some(end) = issue.offset.checked_add(issue.length) else {
+            log::warn!(
+                "skipping malformed issue at offset {}: length overflow",
+                issue.offset
+            );
+            skipped += 1;
+            continue;
+        };
+
+        // Skip overlapping issues: grammar issues are appended after
+        // overlap resolution and may overlap each other (e.g. 對X進行Y
+        // overlaps the inner 進行Y).  The fixer must not apply both.
+        if issue.offset < cursor {
+            skipped += 1;
+            continue;
+        }
 
         // Skip if the issue span overlaps any excluded region.
         if excluded_offsets
