@@ -290,6 +290,8 @@ impl Server {
         let max_errors = args.get("max_errors").and_then(|v| v.as_u64());
         let max_warnings = args.get("max_warnings").and_then(|v| v.as_u64());
         let ignore_terms = parse_ignore_terms(args);
+        let ignore_set: std::collections::HashSet<&str> =
+            ignore_terms.iter().map(String::as_str).collect();
         let explain = parse_explain(args);
         let output_mode =
             match parse_output_mode(args, default_output_mode(self.client_name.as_deref())) {
@@ -328,7 +330,7 @@ impl Server {
                     refine_issues_with_sampling(&mut issues, b, text, 0.3, 0.8);
                 }
                 self.apply_suppressions(&mut issues);
-                apply_ignore_terms(&mut issues, &ignore_terms);
+                apply_ignore_set(&mut issues, &ignore_set);
 
                 let trace =
                     Trace::new("zhtw", &self.ruleset_hash, text).with_issue_count(issues.len());
@@ -384,7 +386,7 @@ impl Server {
                 }
 
                 self.apply_suppressions(&mut issues);
-                apply_ignore_terms(&mut issues, &ignore_terms);
+                apply_ignore_set(&mut issues, &ignore_set);
 
                 // Snapshot AFTER suppressions so restored severity reflects final state.
                 struct PreservedState {
@@ -430,22 +432,34 @@ impl Server {
                     filter_by_stance(&mut remaining_issues, st);
                 }
                 self.apply_suppressions(&mut remaining_issues);
-                apply_ignore_terms(&mut remaining_issues, &ignore_terms);
+                apply_ignore_set(&mut remaining_issues, &ignore_set);
+
+                // Precompute remapped offsets once (O(M*F)) and index by
+                // post-fix offset for O(1) lookup per remaining issue.
+                use rustc_hash::FxHashMap;
+                let mut state_by_offset: FxHashMap<usize, Vec<usize>> =
+                    FxHashMap::with_capacity_and_hasher(preserved_states.len(), Default::default());
+                for (idx, state) in preserved_states.iter().enumerate() {
+                    let remapped = remap_to_post_fix(state.orig_offset, &fix_result.applied_fixes);
+                    state_by_offset.entry(remapped).or_default().push(idx);
+                }
 
                 // Re-apply preserved states using identity-safe matching:
                 // term + remapped offset + length + english must all match.
                 for issue in &mut remaining_issues {
-                    if let Some(state) = preserved_states.iter().find(|s| {
-                        let expected = remap_to_post_fix(s.orig_offset, &fix_result.applied_fixes);
-                        s.term == issue.found
-                            && issue.offset == expected
-                            && s.length == issue.length
-                            && s.english == issue.english
-                    }) {
-                        issue.severity = state.severity;
-                        issue.anchor_match = state.anchor_match;
-                        issue.context = state.context.clone();
-                        issue.suggestions = state.suggestions.clone();
+                    if let Some(candidates) = state_by_offset.get(&issue.offset) {
+                        if let Some(&idx) = candidates.iter().find(|&&idx| {
+                            let s = &preserved_states[idx];
+                            s.term == issue.found
+                                && s.length == issue.length
+                                && s.english == issue.english
+                        }) {
+                            let state = &preserved_states[idx];
+                            issue.severity = state.severity;
+                            issue.anchor_match = state.anchor_match;
+                            issue.context = state.context.clone();
+                            issue.suggestions = state.suggestions.clone();
+                        }
                     }
                 }
 
@@ -840,14 +854,13 @@ fn filter_by_stance(issues: &mut Vec<Issue>, stance: PoliticalStance) {
     });
 }
 
-/// Downgrade issues whose found term matches an ignore_terms entry to Info.
-fn apply_ignore_terms(issues: &mut [Issue], ignore_terms: &[String]) {
-    if ignore_terms.is_empty() {
+/// Downgrade issues whose found term matches a pre-built ignore set to Info.
+fn apply_ignore_set(issues: &mut [Issue], ignore_set: &std::collections::HashSet<&str>) {
+    if ignore_set.is_empty() {
         return;
     }
-    let set: std::collections::HashSet<&str> = ignore_terms.iter().map(String::as_str).collect();
     for issue in issues {
-        if set.contains(issue.found.as_str()) {
+        if ignore_set.contains(issue.found.as_str()) {
             issue.severity = Severity::Info;
         }
     }

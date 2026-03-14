@@ -290,6 +290,103 @@ fn bench_segmenter(c: &mut Criterion) {
     });
 }
 
+// 7. Post-scan transforms: ignore_terms downgrade + preserved-state remap
+
+fn bench_post_scan_transforms(c: &mut Criterion) {
+    use rustc_hash::FxHashMap;
+    use std::collections::HashSet;
+    use zhtw_mcp::fixer::remap_to_post_fix;
+    use zhtw_mcp::fixer::AppliedFix;
+    use zhtw_mcp::rules::ruleset::{Issue, IssueType, Severity};
+
+    // Simulate post-scan transform workload at three issue counts.
+    let issue_counts: &[(usize, &str)] = &[(100, "100"), (500, "500"), (1000, "1000")];
+    let ignore_terms: HashSet<&str> = ["軟件", "信息", "數據"].iter().copied().collect();
+
+    let mut group = c.benchmark_group("post_scan_transforms");
+    for &(count, label) in issue_counts {
+        // Build synthetic issues at evenly spaced offsets.
+        let terms = ["軟件", "信息", "數據", "應用程序", "網絡"];
+        let issues: Vec<Issue> = (0..count)
+            .map(|i| {
+                let term = terms[i % terms.len()];
+                Issue {
+                    offset: i * 100,
+                    length: term.len(),
+                    line: i + 1,
+                    col: 1,
+                    found: term.to_string(),
+                    suggestions: vec!["替代".to_string()],
+                    rule_type: IssueType::CrossStrait,
+                    severity: Severity::Warning,
+                    context: Some("test context".to_string()),
+                    english: Some("term".to_string()),
+                    context_clues: None,
+                    anchor_match: None,
+                }
+            })
+            .collect();
+
+        // Simulate applied fixes (every 5th issue gets a fix with +3 byte delta).
+        let applied_fixes: Vec<AppliedFix> = (0..count)
+            .step_by(5)
+            .map(|i| AppliedFix {
+                offset: i * 100,
+                old_len: terms[i % terms.len()].len(),
+                replacement: "替代用語".to_string(),
+            })
+            .collect();
+
+        group.bench_with_input(
+            BenchmarkId::new("ignore_downgrade", label),
+            &issues,
+            |b, issues| {
+                b.iter(|| {
+                    let mut cloned = issues.clone();
+                    let set = black_box(&ignore_terms);
+                    for issue in &mut cloned {
+                        if set.contains(issue.found.as_str()) {
+                            issue.severity = Severity::Info;
+                        }
+                    }
+                    black_box(&cloned);
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("remap_hashmap_lookup", label),
+            &issues,
+            |b, issues| {
+                b.iter(|| {
+                    // Precompute remapped offsets and build index.
+                    let mut state_by_offset: FxHashMap<usize, Vec<usize>> =
+                        FxHashMap::with_capacity_and_hasher(issues.len(), Default::default());
+                    for (idx, issue) in issues.iter().enumerate() {
+                        let remapped = remap_to_post_fix(issue.offset, black_box(&applied_fixes));
+                        state_by_offset.entry(remapped).or_default().push(idx);
+                    }
+                    // Simulate lookup for each remaining issue using post-fix offsets.
+                    let mut match_count = 0usize;
+                    for issue in issues {
+                        let remapped = remap_to_post_fix(issue.offset, black_box(&applied_fixes));
+                        if let Some(candidates) = state_by_offset.get(&remapped) {
+                            if candidates.iter().any(|&idx| {
+                                let s = &issues[idx];
+                                s.found == issue.found && s.length == issue.length
+                            }) {
+                                match_count += 1;
+                            }
+                        }
+                    }
+                    black_box(match_count);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 // Criterion harness
 
 criterion_group!(
@@ -302,5 +399,6 @@ criterion_group!(
     bench_scan_context_clues,
     bench_markdown_exclusion,
     bench_segmenter,
+    bench_post_scan_transforms,
 );
 criterion_main!(benches);
