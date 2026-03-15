@@ -10,9 +10,7 @@ use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use super::tools::Server;
-use super::types::{
-    JsonRpcRequest, JsonRpcResponse, INVALID_REQUEST, JSONRPC_VERSION, PARSE_ERROR,
-};
+use super::types::{JsonRpcRequest, JsonRpcResponse, TransportError, INVALID_REQUEST, PARSE_ERROR};
 
 /// Maximum line length (4 MiB), matching the sync transport.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
@@ -35,6 +33,7 @@ async fn async_stdio_loop(server: &mut Server) -> Result<()> {
     let mut reader = BufReader::new(stdin);
     let mut stdout = tokio::io::stdout();
     let mut raw_buf: Vec<u8> = Vec::new();
+    let mut write_buf: Vec<u8> = Vec::new();
 
     loop {
         raw_buf.clear();
@@ -50,12 +49,25 @@ async fn async_stdio_loop(server: &mut Server) -> Result<()> {
         }
         if raw_buf.len() > MAX_LINE_BYTES {
             // Drain the remainder of the oversized line so the next
-            // iteration starts at a fresh line boundary.
+            // iteration starts at a fresh line boundary.  Use a small
+            // scratch buffer instead of appending to raw_buf (which
+            // would allow unbounded memory growth).
             if raw_buf.last() != Some(&b'\n') {
-                let _ = reader.read_until(b'\n', &mut raw_buf).await;
+                loop {
+                    let buf = reader.fill_buf().await?;
+                    if buf.is_empty() {
+                        break;
+                    }
+                    if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                        reader.consume(pos + 1);
+                        break;
+                    }
+                    let len = buf.len();
+                    reader.consume(len);
+                }
             }
             let resp = JsonRpcResponse::error(None, INVALID_REQUEST, "request too large".into());
-            send_async(&mut stdout, &resp).await?;
+            send_async(&mut stdout, &resp, &mut write_buf).await?;
             continue;
         }
         let Ok(line) = str::from_utf8(&raw_buf).map(str::trim) else {
@@ -64,7 +76,7 @@ async fn async_stdio_loop(server: &mut Server) -> Result<()> {
                 PARSE_ERROR,
                 "request contains malformed UTF-8 character(s)".into(),
             );
-            send_async(&mut stdout, &resp).await?;
+            send_async(&mut stdout, &resp, &mut write_buf).await?;
             continue;
         };
 
@@ -72,46 +84,21 @@ async fn async_stdio_loop(server: &mut Server) -> Result<()> {
             continue;
         }
 
-        // Parse once; reuse for response-shape check and typed conversion.
-        let obj: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("invalid JSON-RPC: {e}");
-                let resp = JsonRpcResponse::error(None, PARSE_ERROR, format!("parse error: {e}"));
-                send_async(&mut stdout, &resp).await?;
-                continue;
-            }
-        };
-
-        // Discard response-shaped messages (stale sampling responses).
-        if obj.is_object() && obj.get("method").is_none() {
-            log::debug!("discarding response-shaped message");
-            continue;
-        }
-
-        let mut req: JsonRpcRequest = match serde_json::from_value(obj) {
+        // Parse and validate the JSON-RPC request via shared parser.
+        let mut req = match super::types::parse_jsonrpc_line(line) {
             Ok(r) => r,
+            Err(TransportError::StaleResponse) => {
+                log::debug!("discarding stale response-shaped message (no id)");
+                continue;
+            }
             Err(e) => {
-                log::warn!("invalid JSON-RPC request: {e}");
-                let resp =
-                    JsonRpcResponse::error(None, INVALID_REQUEST, format!("invalid request: {e}"));
-                send_async(&mut stdout, &resp).await?;
+                log::warn!("{e}");
+                if let Some(resp) = e.into_response(None) {
+                    send_async(&mut stdout, &resp, &mut write_buf).await?;
+                }
                 continue;
             }
         };
-
-        if req.jsonrpc != JSONRPC_VERSION {
-            let resp = JsonRpcResponse::error(
-                req.id.clone(),
-                INVALID_REQUEST,
-                format!(
-                    "expected jsonrpc \"{JSONRPC_VERSION}\", got \"{}\"",
-                    req.jsonrpc
-                ),
-            );
-            send_async(&mut stdout, &resp).await?;
-            continue;
-        }
 
         // Dispatch synchronously. For tools/call with sampling, we fall back
         // to the synchronous SamplingBridge since the Server is not async.
@@ -119,7 +106,7 @@ async fn async_stdio_loop(server: &mut Server) -> Result<()> {
         // simple non-sampling dispatch for the async path.
         let resp = dispatch_async(server, &mut req);
         if let Some(resp) = resp {
-            send_async(&mut stdout, &resp).await?;
+            send_async(&mut stdout, &resp, &mut write_buf).await?;
         }
     }
 
@@ -143,10 +130,15 @@ fn dispatch_async(server: &mut Server, req: &mut JsonRpcRequest) -> Option<JsonR
     }
 }
 
-async fn send_async(writer: &mut tokio::io::Stdout, resp: &JsonRpcResponse) -> Result<()> {
-    let mut buf = serde_json::to_string(resp)?;
-    buf.push('\n');
-    writer.write_all(buf.as_bytes()).await?;
+async fn send_async(
+    writer: &mut tokio::io::Stdout,
+    resp: &JsonRpcResponse,
+    buf: &mut Vec<u8>,
+) -> Result<()> {
+    buf.clear();
+    serde_json::to_writer(&mut *buf, resp)?;
+    buf.push(b'\n');
+    writer.write_all(buf).await?;
     writer.flush().await?;
     Ok(())
 }
