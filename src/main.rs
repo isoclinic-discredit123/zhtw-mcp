@@ -118,8 +118,9 @@ fn main() -> Result<()> {
                                 "human" => LintFormat::Human,
                                 "sarif" => LintFormat::Sarif,
                                 "compact" => LintFormat::Compact,
+                                "tabular" => LintFormat::Tabular,
                                 _ => anyhow::bail!(
-                                    "unknown format: {fmt} (expected 'json', 'human', 'sarif', or 'compact')"
+                                    "unknown format: {fmt} (expected 'json', 'human', 'sarif', 'compact', or 'tabular')"
                                 ),
                             };
                         }
@@ -414,6 +415,7 @@ enum LintFormat {
     Json,
     Sarif,
     Compact,
+    Tabular,
 }
 
 struct LintBatchParams<'a> {
@@ -486,6 +488,7 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
         .transpose()?
         .unwrap_or_default();
     let mut baseline_count: usize = 0;
+    let mut tabular_header_printed = false;
 
     for file_arg in &resolved {
         // Content type: explicit override > auto-detect from extension.
@@ -838,6 +841,80 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                         }
                     }
                     println!();
+                }
+            }
+            LintFormat::Tabular => {
+                use std::fmt::Write as FmtWrite;
+                use zhtw_mcp::mcp::tools::{
+                    compress_locations, escape_tsv_field, group_issues, shorten_severity,
+                    shorten_type,
+                };
+
+                let groups = group_issues(&report_issues, params.explain);
+
+                let file_prefix = if file_arg == "--" {
+                    String::new()
+                } else {
+                    let display_path = std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| {
+                            Path::new(file_arg)
+                                .strip_prefix(&cwd)
+                                .ok()
+                                .map(|p| p.to_string_lossy().into_owned())
+                        })
+                        .unwrap_or_else(|| file_arg.clone());
+                    format!("{display_path}:")
+                };
+
+                if !report_issues.is_empty() {
+                    if !tabular_header_printed {
+                        if params.explain {
+                            println!("found\tsug\ttype\tsev\tn\tloc\texpl");
+                        } else {
+                            println!("found\tsug\ttype\tsev\tn\tloc");
+                        }
+                        tabular_header_printed = true;
+                    }
+                    for ((found, rt, _, sev), group) in &groups {
+                        let sug_str = group
+                            .suggestions
+                            .iter()
+                            .map(|s| escape_tsv_field(s))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        // When a file prefix is present, each location
+                        // must be individually prefixed so consumers can
+                        // parse "file:L:C,file:L:C" tuples correctly.
+                        let loc_str = if file_prefix.is_empty() {
+                            compress_locations(&group.locs)
+                        } else {
+                            group
+                                .locs
+                                .iter()
+                                .map(|(l, c)| format!("{file_prefix}{l}:{c}"))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        };
+                        let loc_escaped = escape_tsv_field(&loc_str);
+                        let mut line = String::new();
+                        let _ = write!(
+                            line,
+                            "{}\t{sug_str}\t{}\t{}\t{}\t{loc_escaped}",
+                            escape_tsv_field(found),
+                            shorten_type(rt),
+                            shorten_severity(sev),
+                            group.count,
+                        );
+                        if params.explain {
+                            if let Some(ref expl) = group.explanation {
+                                let _ = write!(line, "\t{}", escape_tsv_field(expl));
+                            } else {
+                                line.push('\t');
+                            }
+                        }
+                        println!("{line}");
+                    }
                 }
             }
             LintFormat::Sarif => {

@@ -13,6 +13,7 @@
 // response are stashed in a spillover buffer.  The transport re-processes
 // these after the bridge is dropped, preventing message loss.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -108,6 +109,10 @@ impl<'a> SamplingBridge<'a> {
 
     /// Send a disambiguation request and wait for the client's response.
     ///
+    /// Uses a hybrid zh-TW/English prompt: structural constraints in compressed
+    /// English, analytical payload in zh-TW so the LLM reasons natively.
+    /// Format-Restricting Instructions constrain response to bare term only.
+    ///
     /// Returns None on timeout, error, budget exhaustion, or parse failure.
     pub fn sample_disambiguation(
         &mut self,
@@ -121,12 +126,14 @@ impl<'a> SamplingBridge<'a> {
         let english = issue.english.as_deref().unwrap_or("(unknown)");
         let suggestions_str = issue.suggestions.join(", ");
 
+        // Compressed English prompt with Format-Restricting Instructions.
+        // Eliminates politeness tokens, redundant framing, and verbose explanations.
+        // Strict negative constraint prevents preamble; UNKNOWN fallback for
+        // cases where none of the alternatives apply.
         let question = format!(
-            "Context: \"{context_window}\"\n\n\
-             The term '{found}' (English: {english}) was found. \
-             In Taiwan Traditional Chinese, the correct term could be: {suggestions}.\n\n\
-             Based on the context, which term is correct? Reply with ONLY the correct \
-             Chinese term, nothing else.",
+            "\"{context_window}\"\n\
+             '{found}'(en:{english}) zh-TW:{suggestions}\n\
+             Correct term? If unsure:UNKNOWN",
             found = issue.found,
             suggestions = suggestions_str,
         );
@@ -147,7 +154,7 @@ impl<'a> SamplingBridge<'a> {
                         "text": question
                     }
                 }],
-                "maxTokens": 100,
+                "maxTokens": 32,
                 "includeContext": "thisServer"
             }
         });
@@ -201,16 +208,11 @@ impl<'a> SamplingBridge<'a> {
             })
             .collect();
 
+        // Compressed English prompt with Format-Restricting Instructions.
         let question = format!(
-            "You are a cross-strait Chinese terminology validator. \
-             For each term below, determine if the English translation confirms \
-             it is being used as the cross-strait (Mainland China) variant rather \
-             than the Taiwan standard term.\n\n\
-             Terms: {}\n\n\
-             Reply with ONLY a JSON object mapping each \"id\" (as string key) to \
-             true (confirmed cross-strait usage) or false (not confirmed). \
-             Example: {{\"0\": true, \"1\": false}}\n\
-             No explanation, no markdown, just the JSON object.",
+            "Per term: true=mainland CN, false=not.\n\
+             {}\n\
+             JSON:{{\"0\":true,\"1\":false}}",
             serde_json::to_string(&terms_json).unwrap_or_default()
         );
 
@@ -230,7 +232,7 @@ impl<'a> SamplingBridge<'a> {
                         "text": question
                     }
                 }],
-                "maxTokens": 1024,
+                "maxTokens": 128,
                 "includeContext": "thisServer"
             }
         });
@@ -344,6 +346,80 @@ impl<'a> SamplingBridge<'a> {
     }
 }
 
+/// Normalize a context window for cache keying: strip all Unicode whitespace
+/// and trim to +-40 chars around center.
+///
+/// Retains all punctuation that affects semantics (e.g. '，' changes meaning
+/// in "不，好" vs "不好") to prevent false cache hits.
+fn normalize_cache_context(context: &str) -> String {
+    let filtered: String = context.chars().filter(|c| !c.is_whitespace()).collect();
+    // Trim to +-40 chars around center to bound cache key size.
+    let char_count = filtered.chars().count();
+    if char_count <= 80 {
+        filtered
+    } else {
+        let center = char_count / 2;
+        let start = center.saturating_sub(40);
+        let end = (center + 40).min(char_count);
+        filtered.chars().skip(start).take(end - start).collect()
+    }
+}
+
+/// Cached disambiguation result for semantic deduplication.
+#[derive(Debug, Clone)]
+struct CachedDisambiguation {
+    /// The matched term from suggestions, if any.
+    matched_term: Option<String>,
+}
+
+/// In-memory disambiguation cache scoped to a single tools/call invocation.
+/// Keyed on (found_term, english, normalized_context) using length-prefixed
+/// encoding with newline separators to avoid 3 String allocations per lookup.
+/// Zero false-hit risk at the cost of lower hit rate vs. fuzzy matching.
+struct DisambiguationCache {
+    entries: HashMap<String, CachedDisambiguation>,
+}
+
+impl DisambiguationCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    fn make_key(found: &str, english: Option<&str>, context: &str) -> String {
+        use std::fmt::Write;
+        let norm_ctx = normalize_cache_context(context);
+        let eng = english.unwrap_or("");
+        // Length-prefixed encoding prevents collisions from embedded
+        // separators (NUL or otherwise) in field values.
+        let mut key = String::with_capacity(found.len() + eng.len() + norm_ctx.len() + 20);
+        let _ = write!(key, "{}:{}\n{}:{}\n", found.len(), found, eng.len(), eng);
+        key.push_str(&norm_ctx);
+        key
+    }
+
+    fn get(
+        &self,
+        found: &str,
+        english: Option<&str>,
+        context: &str,
+    ) -> Option<&CachedDisambiguation> {
+        self.entries.get(&Self::make_key(found, english, context))
+    }
+
+    fn insert(
+        &mut self,
+        found: &str,
+        english: Option<&str>,
+        context: &str,
+        result: CachedDisambiguation,
+    ) {
+        self.entries
+            .insert(Self::make_key(found, english, context), result);
+    }
+}
+
 /// Match LLM response text against issue suggestions.
 ///
 /// Prefers exact match, then falls back to the longest substring match.
@@ -402,7 +478,10 @@ pub(crate) fn is_sampling_eligible(
 /// Refine issues using sampling.  For each eligible issue (up to budget),
 /// ask the host LLM to disambiguate.  If the LLM confirms a specific
 /// suggestion, promote that suggestion to the front; if it rejects the
-/// match, downgrade severity to Info.
+/// match (UNKNOWN or no suggestion match), downgrade severity to Info.
+///
+/// Pre-collects eligible issues and uses a semantic cache to avoid redundant
+/// LLM calls for the same term in similar contexts within a single invocation.
 pub(crate) fn refine_issues_with_sampling(
     issues: &mut [Issue],
     bridge: &mut SamplingBridge<'_>,
@@ -410,15 +489,16 @@ pub(crate) fn refine_issues_with_sampling(
     ambiguous_threshold: f32,
     decided_threshold: f32,
 ) {
-    for issue in issues.iter_mut() {
-        if !bridge.has_budget() {
-            break;
-        }
+    if !bridge.has_budget() {
+        return;
+    }
+
+    // Collect eligible issue indices with their context windows.
+    let mut eligible: Vec<(usize, String)> = Vec::new();
+    for (idx, issue) in issues.iter().enumerate() {
         if !is_sampling_eligible(issue, ambiguous_threshold, decided_threshold) {
             continue;
         }
-
-        // Extract context window (~40 CJK chars around the match).
         let start = text.floor_char_boundary(issue.offset.saturating_sub(120));
         let end = text.ceil_char_boundary(
             issue
@@ -427,28 +507,60 @@ pub(crate) fn refine_issues_with_sampling(
                 .saturating_add(120)
                 .min(text.len()),
         );
-        let context_window = &text[start..end];
+        eligible.push((idx, text[start..end].to_string()));
+        // Cap collection to avoid unbounded allocation on large docs.
+        // Use 10x remaining budget to leave headroom for cache dedup
+        // (which filters duplicates only during iteration below).
+        if eligible.len() >= bridge.budget.saturating_sub(bridge.used).saturating_mul(10) {
+            break;
+        }
+    }
+
+    if eligible.is_empty() {
+        return;
+    }
+
+    // Semantic cache: avoid redundant LLM calls for the same term in
+    // similar contexts within a single invocation.
+    let mut cache = DisambiguationCache::new();
+
+    for (idx, context_window) in &eligible {
+        if !bridge.has_budget() {
+            break;
+        }
+        let issue = &mut issues[*idx];
+
+        // Check cache first: exact match on (found, english, normalized_context).
+        if let Some(cached) = cache.get(&issue.found, issue.english.as_deref(), context_window) {
+            let cached = cached.clone();
+            apply_disambiguation(issue, &cached.matched_term, "cached");
+            continue;
+        }
 
         match bridge.sample_disambiguation(issue, context_window) {
             Some(result) => {
-                // Try to match the LLM's response against suggestions.
-                if let Some(term) = find_matching_suggestion(&result.text, &issue.suggestions) {
-                    // Promote matched suggestion to front.
-                    if let Some(pos) = issue.suggestions.iter().position(|s| s == &term) {
-                        issue.suggestions.swap(0, pos);
-                    }
-                    // Add sampling metadata to context.
-                    issue.context = Some(format!(
-                        "LLM disambiguation: '{}' (sampling confirmed)",
-                        term
-                    ));
-                }
-                // If no match, leave issue as-is.
+                let matched = find_matching_suggestion(&result.text, &issue.suggestions);
+                // Build detail string: "sampling confirmed" for matches,
+                // "response: '<truncated>'" for rejections (explicit rejection
+                // signal, distinct from timeout which preserves severity).
+                let detail = if matched.is_some() {
+                    "sampling confirmed".to_string()
+                } else {
+                    let truncated: String = result.text.chars().take(30).collect();
+                    format!("response: '{truncated}'")
+                };
+                apply_disambiguation(issue, &matched, &detail);
+                cache.insert(
+                    &issue.found,
+                    issue.english.as_deref(),
+                    context_window,
+                    CachedDisambiguation {
+                        matched_term: matched,
+                    },
+                );
             }
             None => {
                 // Timeout or error: annotate context but keep original severity.
-                // Downgrading to Info here would silently flip a max_errors gate
-                // from reject to accept whenever sampling infrastructure fails.
                 let ctx = issue.context.take().unwrap_or_default();
                 issue.context = Some(format!(
                     "{}{}sampling timeout/unavailable",
@@ -457,6 +569,20 @@ pub(crate) fn refine_issues_with_sampling(
                 ));
             }
         }
+    }
+}
+
+/// Apply a disambiguation result to an issue: promote matched suggestion
+/// to front, or downgrade to Info on rejection.
+fn apply_disambiguation(issue: &mut Issue, matched_term: &Option<String>, detail: &str) {
+    if let Some(term) = matched_term {
+        if let Some(pos) = issue.suggestions.iter().position(|s| s == term) {
+            issue.suggestions.swap(0, pos);
+        }
+        issue.context = Some(format!("LLM disambiguation: '{term}' ({detail})",));
+    } else {
+        issue.severity = crate::rules::ruleset::Severity::Info;
+        issue.context = Some(format!("LLM disambiguation: rejected ({detail})"));
     }
 }
 
