@@ -688,6 +688,309 @@ fn e2e_initialize_and_tools_list() {
     // tmp_dir auto-cleaned on drop
 }
 
+/// Spawn an initialized MCP child for malformed protocol tests.
+fn spawn_initialized_child() -> (
+    impl Write,
+    impl BufRead,
+    std::process::Child,
+    tempfile::TempDir,
+) {
+    let bin = binary_path();
+    let tmp_dir = tempfile::tempdir().expect("create temp dir");
+    let overrides_path = tmp_dir.path().join("overrides.json");
+    let suppressions_path = tmp_dir.path().join("suppressions.json");
+
+    let mut child = Command::new(&bin)
+        .args([
+            "--overrides",
+            overrides_path.to_str().unwrap(),
+            "--suppressions",
+            suppressions_path.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn zhtw-mcp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let _resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "malformed-test", "version": "0.1" }
+            }
+        }),
+    );
+    send_notification(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }),
+    );
+
+    (stdin, stdout, child, tmp_dir)
+}
+
+// -- 25.8 Malformed protocol E2E tests --
+
+#[test]
+fn e2e_missing_jsonrpc_field() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "method": "tools/list",
+            "id": 100
+        }),
+    );
+    assert!(
+        resp["error"].is_object(),
+        "missing jsonrpc should return error: {resp}"
+    );
+    let code = resp["error"]["code"].as_i64().unwrap();
+    assert!(
+        code == -32600,
+        "expected INVALID_REQUEST (-32600), got {code}"
+    );
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
+fn e2e_wrong_jsonrpc_version() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "1.0",
+            "method": "tools/list",
+            "id": 101
+        }),
+    );
+    assert!(resp["error"].is_object());
+    assert_eq!(
+        resp["error"]["code"].as_i64().unwrap(),
+        -32600,
+        "wrong version should be INVALID_REQUEST"
+    );
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
+fn e2e_id_as_array_rejected() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    let raw = r#"{"jsonrpc":"2.0","method":"tools/list","id":[1,2],"params":{}}"#;
+    writeln!(stdin, "{raw}").unwrap();
+    stdin.flush().unwrap();
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let resp: Value = serde_json::from_str(line.trim()).unwrap();
+    assert!(
+        resp["error"].is_object(),
+        "array id should be rejected: {resp}"
+    );
+    assert_eq!(resp["error"]["code"].as_i64().unwrap(), -32600);
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
+fn e2e_id_as_object_rejected() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    let raw = r#"{"jsonrpc":"2.0","method":"tools/list","id":{"a":1},"params":{}}"#;
+    writeln!(stdin, "{raw}").unwrap();
+    stdin.flush().unwrap();
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let resp: Value = serde_json::from_str(line.trim()).unwrap();
+    assert!(resp["error"].is_object(), "object id should be rejected");
+    assert_eq!(resp["error"]["code"].as_i64().unwrap(), -32600);
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
+fn e2e_params_as_array_handled() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    let raw = r#"{"jsonrpc":"2.0","method":"tools/list","id":102,"params":[1,2,3]}"#;
+    writeln!(stdin, "{raw}").unwrap();
+    stdin.flush().unwrap();
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let resp: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(resp["id"], 102);
+    assert!(
+        resp.get("result").is_some() || resp.get("error").is_some(),
+        "server should handle array params without crashing"
+    );
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
+fn e2e_empty_method_returns_not_found() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "",
+            "id": 103
+        }),
+    );
+    assert!(resp["error"].is_object(), "empty method should error");
+    assert_eq!(
+        resp["error"]["code"].as_i64().unwrap(),
+        -32601,
+        "empty method should be METHOD_NOT_FOUND"
+    );
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
+fn e2e_method_trailing_whitespace() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/list ",
+            "id": 104,
+            "params": {}
+        }),
+    );
+    assert!(
+        resp["error"].is_object(),
+        "trailing whitespace method should error"
+    );
+    assert_eq!(
+        resp["error"]["code"].as_i64().unwrap(),
+        -32601,
+        "mangled method should be METHOD_NOT_FOUND"
+    );
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
+fn e2e_not_json_returns_parse_error() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    writeln!(stdin, "this is not json at all").unwrap();
+    stdin.flush().unwrap();
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let resp: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(
+        resp["error"]["code"].as_i64().unwrap(),
+        -32700,
+        "non-JSON should return PARSE_ERROR"
+    );
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
+fn e2e_response_shaped_with_id_discarded() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    // Response-shaped message WITH id: silently discarded per JSON-RPC 2.0
+    // ("The Server MUST NOT reply to a Response").
+    let response_msg = r#"{"jsonrpc":"2.0","id":999,"result":"stale"}"#;
+    writeln!(stdin, "{response_msg}").unwrap();
+    stdin.flush().unwrap();
+
+    // No error response expected — verify the server is still alive by
+    // sending a real request and getting a valid response.
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/list",
+            "id": 105,
+            "params": {}
+        }),
+    );
+    assert_eq!(resp["id"], 105);
+    assert!(resp["result"].is_object(), "server should still be alive");
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "child exited with {status}");
+}
+
+#[test]
+fn e2e_response_shaped_without_id_discarded() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    // Response-shaped message WITHOUT id: silently discarded (stale sampling).
+    let response_msg = r#"{"jsonrpc":"2.0","result":"stale"}"#;
+    writeln!(stdin, "{response_msg}").unwrap();
+    stdin.flush().unwrap();
+
+    // No response for the stale message. Send a real request to verify alive.
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/list",
+            "id": 106,
+            "params": {}
+        }),
+    );
+    assert_eq!(resp["id"], 106);
+    assert!(resp["result"].is_object(), "server should still be alive");
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "child exited with {status}");
+}
+
 /// AI agent clients (e.g. claude-code) should auto-default to compact output
 /// without explicitly passing `"output": "compact"`.
 #[test]
