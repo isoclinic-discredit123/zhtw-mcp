@@ -13,11 +13,11 @@ Unified lint / fix / gate for zh-TW text.
 | `max_errors` | integer | Reject if residual errors exceed threshold |
 | `max_warnings` | integer | Reject if residual warnings exceed threshold |
 | `profile` | `"default"` / `"strict_moe"` / `"ui_strings"` | Rule profile |
-| `content_type` | `"plain"` / `"markdown"` / `"yaml"` | Content type |
+| `content_type` | `"plain"` / `"markdown"` / `"markdown-scan-code"` / `"yaml"` | Content type (`markdown-scan-code` also lints inside code blocks) |
 | `political_stance` | `"roc_centric"` / `"neutral"` / `"international"` | Political stance filter |
 | `ignore_terms` | array of strings | Terms to downgrade to Info for this call |
 | `explain` | boolean | Attach cultural/linguistic annotations |
-| `output` | `"full"` / `"compact"` | Output verbosity |
+| `output` | `"full"` / `"compact"` / `"tabular"` | Output verbosity |
 
 Lint only (default):
 

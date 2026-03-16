@@ -14,8 +14,10 @@ zhtw-mcp lint -- < input.txt
 
 # With options
 zhtw-mcp lint file.md --format json --profile strict_moe --max-errors 5
+zhtw-mcp lint file.md --format tabular              # aligned columns
 zhtw-mcp lint docs/ --exclude "vendor/**"
 zhtw-mcp lint -- --content-type markdown < input.md
+zhtw-mcp lint -- --content-type markdown-scan-code < input.md  # also lint inside code blocks
 ```
 
 ## Auto-fix
@@ -34,6 +36,20 @@ zhtw-mcp lint file.md --explain
 ```
 
 Each issue includes a cultural/linguistic annotation and its English anchor term.
+
+## Scan caching
+
+In lint-only mode (no `--fix`), the CLI automatically caches scan results keyed by file content hash (BLAKE3) and scan parameters. Unchanged files are skipped on subsequent runs. The cache lives at the platform default cache directory (`~/.cache/zhtw-mcp/` on Linux, `~/Library/Caches/zhtw-mcp/` on macOS) with 24-hour TTL and a 2000-entry cap. Caching is disabled when `--fix`, `--verify`, or stdin mode is active.
+
+## Output formats
+
+| Format | Flag | Description |
+|--------|------|-------------|
+| `human` | _(default)_ | Colored, multi-line output for terminals |
+| `json` | `--format json` | Machine-readable JSON array |
+| `compact` | `--format compact` | One line per issue |
+| `tabular` | `--format tabular` | Aligned columns for quick scanning |
+| `sarif` | `--format sarif` | SARIF v2.1.0 for GitHub Code Scanning |
 
 ## CI/CD integration
 
@@ -78,6 +94,8 @@ zhtw-mcp convert file.md --content-type markdown
 ```
 
 This is a two-stage pipeline: first a built-in character/phrase converter (SC→TC), then iterative vocabulary normalization via the standard scanner.
+
+When the `translate` feature is enabled, the `lint` subcommand supports `--verify` to confirm ambiguous substitutions against English anchor terms. The `convert` subcommand does not accept `--verify`; it runs the full calibration step unconditionally when the feature is active.
 
 ## Editor integration setup
 
