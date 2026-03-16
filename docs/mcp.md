@@ -9,7 +9,7 @@ Unified lint / fix / gate for zh-TW text.
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `text` | string (required) | Text to check |
-| `fix_mode` | `"none"` / `"safe"` / `"aggressive"` | Fix mode (default: `"none"`) |
+| `fix_mode` | `"none"` / `"orthographic"` / `"lexical_safe"` / `"lexical_contextual"` | Fix mode (default: `"none"`) |
 | `max_errors` | integer | Reject if residual errors exceed threshold |
 | `max_warnings` | integer | Reject if residual warnings exceed threshold |
 | `profile` | `"default"` / `"strict_moe"` / `"ui_strings"` | Rule profile |
@@ -30,7 +30,7 @@ Returns issues with line/column position, matched term, suggestions, rule type, 
 Lint + fix + gate:
 
 ```json
-{"text": "請使用內存中的緩存數據", "max_errors": 0, "fix_mode": "safe"}
+{"text": "請使用內存中的緩存數據", "max_errors": 0, "fix_mode": "lexical_safe"}
 ```
 
 If residual errors exceed `max_errors` (or warnings exceed `max_warnings`), the response has `"accepted": false`. Otherwise `"accepted": true` with corrected text.
@@ -92,7 +92,7 @@ Lint this article with max_errors=0 and abort if any violations are found:
 [paste text]
 
 Act as a zh-TW copy editor. For every response you write in Chinese, run zhtw
-with fix_mode "safe" and max_errors 0 before sending it to me.
+with fix_mode "lexical_safe" and max_errors 0 before sending it to me.
 ```
 
 ### Git / CI workflows

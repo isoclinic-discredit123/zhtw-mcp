@@ -362,7 +362,7 @@ impl Server {
                 })
             }
 
-            mode @ (FixMode::Safe | FixMode::Aggressive) => {
+            mode @ (FixMode::Orthographic | FixMode::LexicalSafe | FixMode::LexicalContextual) => {
                 // Fix path: scan, apply fixes, re-scan for residual issues.
                 let excluded = build_exclusions_for_content_type(text, content_type);
                 let scan_out = self.scanner.scan_with_prebuilt_excluded(
@@ -614,11 +614,12 @@ fn require_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, CallToolResu
 /// Returns an error for unrecognized values instead of silently defaulting.
 fn parse_fix_mode(args: &Value) -> Result<FixMode, CallToolResult> {
     match args.get("fix_mode").and_then(|v| v.as_str()) {
-        Some("safe") => Ok(FixMode::Safe),
-        Some("aggressive") => Ok(FixMode::Aggressive),
+        Some("orthographic") => Ok(FixMode::Orthographic),
+        Some("lexical_safe") => Ok(FixMode::LexicalSafe),
+        Some("lexical_contextual") => Ok(FixMode::LexicalContextual),
         None | Some("none") => Ok(FixMode::None),
         Some(other) => Err(CallToolResult::error(format!(
-            "invalid 'fix_mode': '{other}' (expected 'none', 'safe', or 'aggressive')"
+            "invalid 'fix_mode': '{other}' (expected 'none', 'orthographic', 'lexical_safe', or 'lexical_contextual')"
         ))),
     }
 }
@@ -1607,7 +1608,7 @@ fn tool_definitions() -> Vec<ToolDef> {
             props.insert("text".into(), json!({ "type": "string" }));
             props.insert("fix_mode".into(), json!({
                 "type": "string",
-                "enum": ["none", "safe", "aggressive"]
+                "enum": ["none", "orthographic", "lexical_safe", "lexical_contextual"]
             }));
             props.insert("max_errors".into(), json!({ "type": "integer" }));
             props.insert("max_warnings".into(), json!({ "type": "integer" }));

@@ -1,11 +1,20 @@
 // Fix application: apply suggested corrections to source text.
 //
-// Three modes:
+// Four tiers (strict superset hierarchy):
 //   - None: lint only, no fixes applied.
-//   - Safe: only apply fixes where suggestions.len() == 1 (unambiguous)
-//     and no context_clues are present (or context is confirmed).
-//   - Aggressive: pick suggestions[0]; for rules with context_clues,
-//     check if 2+ clue words appear in surrounding text before applying.
+//   - Orthographic: punctuation, spacing, character forms, case, variant,
+//     ellipsis, grammar only.  Lexical term substitutions are skipped.
+//   - LexicalSafe: orthographic + deterministic term substitutions
+//     (exactly one suggestion, no context_clues).  When --verify
+//     calibration has run, issues with anchor_match == Some(false)
+//     are skipped; anchor_match == None applies unconditionally.
+//   - LexicalContextual: all above + context-clue-gated terms.  For
+//     rules with context_clues, apply only when a segmenter confirms
+//     enough clue words in surrounding text.  Non-clue lexical issues
+//     use the same single-suggestion constraint as LexicalSafe.
+//     Anchor rejection (Some(false)) is respected for non-clue issues
+//     but overridden for clue-gated issues (segmenter provides
+//     independent confirmation).
 //
 // Fixes are applied in a single forward pass (ascending offset order).
 
@@ -14,16 +23,22 @@ use crate::engine::scan::surrounding_window;
 use crate::engine::segment::Segmenter;
 use crate::rules::ruleset::{Issue, IssueType};
 
-/// Fix mode controlling ambiguity handling.
+/// Fix mode controlling which issue types are eligible for automatic correction.
+///
+/// Each tier is a strict superset: None < Orthographic < LexicalSafe < LexicalContextual.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FixMode {
-    /// Lint only — no fixes applied.
+    /// Lint only -- no fixes applied.
     None,
-    /// Only apply unambiguous fixes (exactly one suggestion, no context ambiguity).
-    Safe,
-    /// Always apply first suggestion; for ambiguous rules with context_clues,
-    /// apply only when context clues confirm the intended meaning.
-    Aggressive,
+    /// Orthographic fixes only: punctuation, spacing, character forms, case,
+    /// variant, ellipsis, grammar.  Lexical term substitutions are skipped.
+    Orthographic,
+    /// Orthographic + deterministic term substitutions (exactly one suggestion,
+    /// no context_clues).  Equivalent to old 'safe' mode.
+    LexicalSafe,
+    /// All above + context-clue-gated terms.  For rules with context_clues,
+    /// apply only when segmenter confirms enough clue words nearby.
+    LexicalContextual,
 }
 
 /// Record of a single fix applied to the text.
@@ -44,7 +59,7 @@ pub struct FixResult {
     pub text: String,
     /// Number of fixes applied.
     pub applied: usize,
-    /// Number of issues skipped (ambiguous in Safe mode, or in excluded regions).
+    /// Number of issues skipped (ineligible for the chosen fix tier, or in excluded regions).
     pub skipped: usize,
     /// Detailed record of each applied fix, stored in ascending offset
     /// order (forward pass). Used for position-based convergence
@@ -79,11 +94,17 @@ pub fn apply_fixes(
 /// applied in a single forward pass (ascending offset order): chunks of
 /// unchanged text are copied between replacement spans, yielding O(N).
 ///
-/// When a Segmenter is provided, rules with context_clues are checked
-/// against the surrounding text:
-///   - aggressive mode: apply if MIN_CLUE_MATCHES or more clue words
-///     are found in a window around the match; otherwise skip.
-///   - safe mode: always skip rules that have context_clues (ambiguous).
+/// Fix tiers control which issues are eligible:
+///   - Orthographic: only Punctuation/Case/Variant/Grammar issues.
+///   - LexicalSafe: above + lexical issues without context_clues,
+///     single suggestion only.  When `--verify` calibration has run,
+///     issues with `anchor_match == Some(false)` are skipped (calibration
+///     rejected the term).  `anchor_match == None` (no calibration)
+///     applies unconditionally.
+///   - LexicalContextual: all above + context-clue-gated lexical issues,
+///     verified by segmenter when available.  For non-clue issues, respects
+///     anchor rejections (no independent disambiguation).  For clue-gated
+///     issues, the segmenter overrides anchor rejection.
 pub fn apply_fixes_with_context(
     text: &str,
     issues: &[Issue],
@@ -91,12 +112,29 @@ pub fn apply_fixes_with_context(
     excluded_offsets: &[(usize, usize)],
     segmenter: Option<&Segmenter>,
 ) -> FixResult {
+    // Lint-only mode: no fixes attempted, nothing to skip.
+    if mode == FixMode::None {
+        return FixResult {
+            text: text.to_string(),
+            applied: 0,
+            skipped: 0,
+            applied_fixes: Vec::new(),
+        };
+    }
+
     let mut out = String::with_capacity(text.len());
     let mut applied = 0usize;
     let mut skipped = 0usize;
     let mut applied_fixes = Vec::new();
     // Byte position up to which we have already copied into `out`.
     let mut cursor: usize = 0;
+
+    // Pre-compute excluded ranges for context-clue window lookups (hoisted
+    // out of the per-issue loop to avoid redundant allocations).
+    let excluded_ranges: Vec<crate::engine::excluded::ByteRange> = excluded_offsets
+        .iter()
+        .map(|&(start, end)| crate::engine::excluded::ByteRange { start, end })
+        .collect();
 
     // Issues are already sorted ascending by offset and non-overlapping
     // (scanner's resolve_overlaps guarantees this).  Iterate forward,
@@ -128,51 +166,85 @@ pub fn apply_fixes_with_context(
             continue;
         }
 
-        // Context-clue check: rules with non-empty context_clues are ambiguous.
-        // Safe mode always skips them; aggressive mode applies only when a
-        // segmenter confirms enough clue words in the surrounding text.
+        // Tier-based fix eligibility.
         //
-        // Threshold is type-aware: confusable rules (both forms valid in
-        // different contexts) need 2 clues for confidence; cross-strait and
-        // other rules need only 1 (the match itself is a strong regional
-        // signal, one nearby clue is sufficient to confirm domain).
+        // Orthographic issue types can be fixed mechanically (no lexical
+        // ambiguity).  Lexical types (CrossStrait, Typo, PoliticalColoring,
+        // Confusable) need progressively higher fix tiers.
+        let orthographic = matches!(
+            issue.rule_type,
+            IssueType::Punctuation | IssueType::Case | IssueType::Variant | IssueType::Grammar
+        );
+
+        // Orthographic tier: skip all lexical issues.
+        if mode == FixMode::Orthographic && !orthographic {
+            skipped += 1;
+            continue;
+        }
+
+        // Pre-compute context-clue presence for gating decisions below.
         let has_clues = issue.context_clues.as_ref().is_some_and(|c| !c.is_empty());
-        if has_clues {
+
+        // Anchor-match gating for lexical issues: when calibration has
+        // run (--verify), anchor_match carries the verdict.  If calibration
+        // explicitly rejected the term (Some(false)), skip the fix —
+        // both LexicalSafe and LexicalContextual respect anchor rejection
+        // for non-clue issues (no independent disambiguation available).
+        // Context-clue-gated issues in LexicalContextual can override
+        // rejection because the segmenter provides independent confirmation.
+        // When anchor_match is None (no calibration), apply unconditionally.
+        if !orthographic && issue.anchor_match == Some(false) && !has_clues {
+            skipped += 1;
+            continue;
+        }
+
+        // Context-clue gating for lexical issues.
+        if has_clues && !orthographic {
+            // Only LexicalContextual can handle context-clue-gated terms.
+            if mode != FixMode::LexicalContextual {
+                skipped += 1;
+                continue;
+            }
+            // Threshold is type-aware: confusable rules (both forms valid in
+            // different contexts) need 2 clues for confidence; cross-strait and
+            // other rules need only 1 (the match itself is a strong regional
+            // signal, one nearby clue is sufficient to confirm domain).
             let min_clues = if issue.rule_type == IssueType::Confusable {
                 MIN_CLUE_MATCHES_CONFUSABLE
             } else {
                 MIN_CLUE_MATCHES_DEFAULT
             };
-            let confirmed = mode == FixMode::Aggressive
-                && segmenter.is_some_and(|seg| {
-                    let excluded_ranges: Vec<crate::engine::excluded::ByteRange> = excluded_offsets
-                        .iter()
-                        .map(|&(start, end)| crate::engine::excluded::ByteRange { start, end })
-                        .collect();
-                    let window = crate::engine::scan::surrounding_window_bounded(
-                        text,
-                        issue.offset,
-                        end,
-                        &excluded_ranges,
-                    );
-                    let clue_strs: Vec<&str> = issue
-                        .context_clues
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect();
-                    seg.count_context_clues(window, &clue_strs) >= min_clues
-                });
+            let confirmed = segmenter.is_some_and(|seg| {
+                let window = crate::engine::scan::surrounding_window_bounded(
+                    text,
+                    issue.offset,
+                    end,
+                    &excluded_ranges,
+                );
+                let clue_strs: Vec<&str> = issue
+                    .context_clues
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect();
+                seg.count_context_clues(window, &clue_strs) >= min_clues
+            });
             if !confirmed {
                 skipped += 1;
                 continue;
             }
         }
 
+        // Suggestion selection.
+        //   - Orthographic issues: always pick first suggestion (mechanical,
+        //     no lexical ambiguity).
+        //   - Lexical issues (both clue-gated and non-clue): single suggestion
+        //     only.  The segmenter confirms domain context but does not
+        //     disambiguate between multiple replacement candidates.
         let rep = match mode {
-            FixMode::Safe if issue.suggestions.len() == 1 => Some(&issue.suggestions[0]),
-            FixMode::Aggressive => issue.suggestions.first(),
+            _ if orthographic => issue.suggestions.first(),
+            _ if issue.suggestions.len() == 1 => Some(&issue.suggestions[0]),
             _ => None,
         };
         let Some(rep) = rep.filter(|_| end <= text.len()) else {
@@ -285,44 +357,56 @@ mod tests {
         .with_context_clues(clues.into_iter().map(String::from).collect())
     }
 
+    fn make_punctuation_issue(offset: usize, found: &str, suggestions: Vec<&str>) -> Issue {
+        Issue::new(
+            offset,
+            found.len(),
+            found,
+            suggestions.into_iter().map(String::from).collect(),
+            IssueType::Punctuation,
+            Severity::Warning,
+        )
+    }
+
     #[test]
-    fn safe_mode_single_suggestion() {
+    fn lexical_safe_single_suggestion() {
         let text = "這個軟件很好用";
         let issues = vec![make_issue(6, "軟件", vec!["軟體"])];
-        let result = apply_fixes(text, &issues, FixMode::Safe, &[]);
+        let result = apply_fixes(text, &issues, FixMode::LexicalSafe, &[]);
         assert_eq!(result.text, "這個軟體很好用");
         assert_eq!(result.applied, 1);
         assert_eq!(result.skipped, 0);
     }
 
     #[test]
-    fn safe_mode_multiple_suggestions_skipped() {
+    fn lexical_safe_multiple_suggestions_skipped() {
         let text = "這個視頻很好看";
         let issues = vec![make_issue(6, "視頻", vec!["影片", "影音"])];
-        let result = apply_fixes(text, &issues, FixMode::Safe, &[]);
+        let result = apply_fixes(text, &issues, FixMode::LexicalSafe, &[]);
         assert_eq!(result.text, text); // unchanged
         assert_eq!(result.applied, 0);
         assert_eq!(result.skipped, 1);
     }
 
     #[test]
-    fn aggressive_mode_picks_first() {
+    fn lexical_contextual_skips_multi_suggestion_non_clue() {
+        // Multi-suggestion lexical issue without context_clues: both
+        // LexicalSafe and LexicalContextual skip it (no disambiguation).
         let text = "這個視頻很好看";
         let issues = vec![make_issue(6, "視頻", vec!["影片", "影音"])];
-        let result = apply_fixes(text, &issues, FixMode::Aggressive, &[]);
-        assert_eq!(result.text, "這個影片很好看");
-        assert_eq!(result.applied, 1);
+        let result = apply_fixes(text, &issues, FixMode::LexicalContextual, &[]);
+        assert_eq!(result.text, text); // unchanged -- ambiguous, no clues
+        assert_eq!(result.skipped, 1);
     }
 
     #[test]
-    fn multiple_fixes_end_to_start() {
-        // "軟件" at byte 6, "內存" somewhere after.
+    fn multiple_fixes() {
         let text = "這個軟件的內存";
         let issues = vec![
             make_issue(6, "軟件", vec!["軟體"]),
             make_issue(15, "內存", vec!["記憶體"]),
         ];
-        let result = apply_fixes(text, &issues, FixMode::Safe, &[]);
+        let result = apply_fixes(text, &issues, FixMode::LexicalSafe, &[]);
         assert_eq!(result.text, "這個軟體的記憶體");
         assert_eq!(result.applied, 2);
     }
@@ -331,8 +415,7 @@ mod tests {
     fn excluded_offset_skipped() {
         let text = "這個軟件很好用";
         let issues = vec![make_issue(6, "軟件", vec!["軟體"])];
-        // Mark offset 6 as excluded (inside a code fence, say).
-        let result = apply_fixes(text, &issues, FixMode::Safe, &[(0, 21)]);
+        let result = apply_fixes(text, &issues, FixMode::LexicalSafe, &[(0, 21)]);
         assert_eq!(result.text, text);
         assert_eq!(result.skipped, 1);
     }
@@ -340,15 +423,125 @@ mod tests {
     #[test]
     fn empty_issues() {
         let text = "hello";
-        let result = apply_fixes(text, &[], FixMode::Safe, &[]);
+        let result = apply_fixes(text, &[], FixMode::LexicalSafe, &[]);
         assert_eq!(result.text, "hello");
         assert_eq!(result.applied, 0);
+    }
+
+    // -- Orthographic tier tests --
+
+    #[test]
+    fn orthographic_fixes_punctuation() {
+        let text = "你好,世界";
+        let issues = vec![make_punctuation_issue(6, ",", vec!["，"])];
+        let result = apply_fixes(text, &issues, FixMode::Orthographic, &[]);
+        assert_eq!(result.text, "你好，世界");
+        assert_eq!(result.applied, 1);
+    }
+
+    #[test]
+    fn orthographic_skips_lexical_issues() {
+        let text = "這個軟件很好用";
+        let issues = vec![make_issue(6, "軟件", vec!["軟體"])];
+        let result = apply_fixes(text, &issues, FixMode::Orthographic, &[]);
+        assert_eq!(result.text, text); // unchanged -- orthographic skips CrossStrait
+        assert_eq!(result.skipped, 1);
+    }
+
+    // -- Anchor-match gating tests --
+
+    #[test]
+    fn lexical_safe_skips_anchor_rejected() {
+        let text = "這個軟件很好用";
+        let mut issue = make_issue(6, "軟件", vec!["軟體"]);
+        issue.anchor_match = Some(false); // calibration rejected
+        let result = apply_fixes(text, &[issue], FixMode::LexicalSafe, &[]);
+        assert_eq!(result.text, text); // unchanged -- anchor rejected
+        assert_eq!(result.skipped, 1);
+    }
+
+    #[test]
+    fn lexical_safe_applies_anchor_confirmed() {
+        let text = "這個軟件很好用";
+        let mut issue = make_issue(6, "軟件", vec!["軟體"]);
+        issue.anchor_match = Some(true); // calibration confirmed
+        let result = apply_fixes(text, &[issue], FixMode::LexicalSafe, &[]);
+        assert_eq!(result.text, "這個軟體很好用");
+        assert_eq!(result.applied, 1);
+    }
+
+    #[test]
+    fn lexical_safe_applies_anchor_none() {
+        let text = "這個軟件很好用";
+        let issue = make_issue(6, "軟件", vec!["軟體"]);
+        // anchor_match == None (no calibration) -- should apply unconditionally
+        assert!(issue.anchor_match.is_none());
+        let result = apply_fixes(text, &[issue], FixMode::LexicalSafe, &[]);
+        assert_eq!(result.text, "這個軟體很好用");
+        assert_eq!(result.applied, 1);
+    }
+
+    #[test]
+    fn lexical_contextual_respects_anchor_rejection_for_non_clue() {
+        // Non-clue lexical issue with anchor rejection: LexicalContextual
+        // respects it because there is no independent disambiguation signal.
+        let text = "這個軟件很好用";
+        let mut issue = make_issue(6, "軟件", vec!["軟體"]);
+        issue.anchor_match = Some(false);
+        let result = apply_fixes(text, &[issue], FixMode::LexicalContextual, &[]);
+        assert_eq!(result.text, text); // unchanged -- anchor rejected, no clues
+        assert_eq!(result.skipped, 1);
+    }
+
+    // -- Combined anchor_match + context_clues tests --
+
+    #[test]
+    fn lexical_safe_skips_clue_rule_even_with_anchor_confirmed() {
+        // anchor_match == Some(true) but has context_clues → LexicalSafe
+        // still refuses because context-clue rules need LexicalContextual.
+        let text = "我需要編寫一個程序來執行";
+        let offset = text.find("程序").unwrap();
+        let mut issue = make_issue_with_clues(
+            offset,
+            "程序",
+            vec!["程式"],
+            vec!["編寫", "代碼", "執行", "開發"],
+        );
+        issue.anchor_match = Some(true);
+        let result = apply_fixes(text, &[issue], FixMode::LexicalSafe, &[]);
+        assert_eq!(result.text, text); // unchanged -- context_clues gate takes precedence
+        assert_eq!(result.skipped, 1);
+    }
+
+    #[test]
+    fn lexical_contextual_applies_clue_rule_despite_anchor_rejection() {
+        // anchor_match == Some(false) + context_clues present.
+        // LexicalContextual overrides anchor rejection and applies if
+        // segmenter confirms clues.
+        let text = "我需要編寫一個程序來執行";
+        let offset = text.find("程序").unwrap();
+        let mut issue = make_issue_with_clues(
+            offset,
+            "程序",
+            vec!["程式"],
+            vec!["編寫", "代碼", "執行", "開發"],
+        );
+        issue.anchor_match = Some(false);
+        let seg = Segmenter::new(
+            ["編寫", "代碼", "執行", "開發", "程序", "程式"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        let result =
+            apply_fixes_with_context(text, &[issue], FixMode::LexicalContextual, &[], Some(&seg));
+        assert_eq!(result.text, "我需要編寫一個程式來執行");
+        assert_eq!(result.applied, 1);
     }
 
     // -- Context clue tests --
 
     #[test]
-    fn safe_mode_skips_issues_with_context_clues() {
+    fn lexical_safe_skips_issues_with_context_clues() {
         let text = "我需要編寫一個程序來執行";
         let offset = text.find("程序").unwrap();
         let issues = vec![make_issue_with_clues(
@@ -357,14 +550,13 @@ mod tests {
             vec!["程式"],
             vec!["編寫", "代碼", "執行", "開發"],
         )];
-        let result = apply_fixes(text, &issues, FixMode::Safe, &[]);
-        assert_eq!(result.text, text); // unchanged -- safe mode refuses context-clue rules
+        let result = apply_fixes(text, &issues, FixMode::LexicalSafe, &[]);
+        assert_eq!(result.text, text); // unchanged -- lexical_safe refuses context-clue rules
         assert_eq!(result.skipped, 1);
     }
 
     #[test]
-    fn aggressive_with_segmenter_applies_when_clues_match() {
-        // "程序" with context clues; surrounding text contains "編寫" and "執行"
+    fn lexical_contextual_with_segmenter_applies_when_clues_match() {
         let text = "我需要編寫一個程序來執行";
         let offset = text.find("程序").unwrap();
         let issues = vec![make_issue_with_clues(
@@ -378,14 +570,14 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string()),
         );
-        let result = apply_fixes_with_context(text, &issues, FixMode::Aggressive, &[], Some(&seg));
+        let result =
+            apply_fixes_with_context(text, &issues, FixMode::LexicalContextual, &[], Some(&seg));
         assert_eq!(result.text, "我需要編寫一個程式來執行");
         assert_eq!(result.applied, 1);
     }
 
     #[test]
-    fn aggressive_with_segmenter_skips_when_clues_insufficient() {
-        // "程序" but surrounding text has zero matching clues
+    fn lexical_contextual_with_segmenter_skips_when_clues_insufficient() {
         let text = "這個程序很重要";
         let offset = text.find("程序").unwrap();
         let issues = vec![make_issue_with_clues(
@@ -399,15 +591,14 @@ mod tests {
                 .iter()
                 .map(|s| s.to_string()),
         );
-        let result = apply_fixes_with_context(text, &issues, FixMode::Aggressive, &[], Some(&seg));
+        let result =
+            apply_fixes_with_context(text, &issues, FixMode::LexicalContextual, &[], Some(&seg));
         assert_eq!(result.text, text); // unchanged -- insufficient clues
         assert_eq!(result.skipped, 1);
     }
 
     #[test]
-    fn aggressive_without_segmenter_skips_clue_rules() {
-        // Without a segmenter, aggressive mode cannot verify context clues
-        // and skips the rule (same as safe mode).
+    fn lexical_contextual_without_segmenter_skips_clue_rules() {
         let text = "這個程序很重要";
         let offset = text.find("程序").unwrap();
         let issues = vec![make_issue_with_clues(
@@ -416,7 +607,7 @@ mod tests {
             vec!["程式"],
             vec!["編寫", "代碼", "執行", "開發"],
         )];
-        let result = apply_fixes(text, &issues, FixMode::Aggressive, &[]);
+        let result = apply_fixes(text, &issues, FixMode::LexicalContextual, &[]);
         assert_eq!(result.text, text); // unchanged -- no segmenter, cannot verify clues
         assert_eq!(result.skipped, 1);
     }
@@ -456,12 +647,12 @@ mod tests {
 
     #[test]
     fn empty_context_clues_vec_treated_as_no_clues() {
-        // Issue with context_clues: Some(vec![]) should NOT be skipped in safe mode
-        // because the empty vec means no ambiguity (the !clues.is_empty() guard).
+        // Issue with context_clues: Some(vec![]) should NOT be skipped in
+        // lexical_safe because the empty vec means no ambiguity.
         let text = "這個軟件很好用";
         let mut issue = make_issue(6, "軟件", vec!["軟體"]);
         issue.context_clues = Some(vec![]);
-        let result = apply_fixes(text, &[issue], FixMode::Safe, &[]);
+        let result = apply_fixes(text, &[issue], FixMode::LexicalSafe, &[]);
         assert_eq!(result.text, "這個軟體很好用");
         assert_eq!(result.applied, 1);
     }

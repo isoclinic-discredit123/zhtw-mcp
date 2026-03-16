@@ -194,7 +194,7 @@ fn e2e_initialize_and_tools_list() {
                 "name": "zhtw",
                 "arguments": {
                     "text": "這個軟體很好用",
-                    "fix_mode": "safe",
+                    "fix_mode": "lexical_safe",
                     "max_errors": 0
                 }
             }
@@ -219,7 +219,7 @@ fn e2e_initialize_and_tools_list() {
                 "name": "zhtw",
                 "arguments": {
                     "text": "這個軟件用了很多內存",
-                    "fix_mode": "safe"
+                    "fix_mode": "lexical_safe"
                 }
             }
         }),
@@ -424,7 +424,9 @@ fn e2e_initialize_and_tools_list() {
     assert_eq!(output["gate"]["enabled"], true);
     assert!(output["gate"]["residual_errors"].as_u64().unwrap() > 0);
 
-    // -- E2E: fix_mode: "aggressive" --
+    // -- E2E: fix_mode: "lexical_contextual" --
+    // Uses 代碼 (clue-gated: needs 編譯/函式/函數 nearby) + 軟件 (non-clue).
+    // lexical_safe would fix 軟件 but skip 代碼; lexical_contextual fixes both.
 
     let resp = send_recv(
         &mut stdin,
@@ -436,8 +438,8 @@ fn e2e_initialize_and_tools_list() {
             "params": {
                 "name": "zhtw",
                 "arguments": {
-                    "text": "這個軟件和視頻很好",
-                    "fix_mode": "aggressive"
+                    "text": "編譯這個軟件的代碼",
+                    "fix_mode": "lexical_contextual"
                 }
             }
         }),
@@ -446,8 +448,14 @@ fn e2e_initialize_and_tools_list() {
     let content_text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let output: Value = serde_json::from_str(content_text).unwrap();
     let fixed = output["text"].as_str().unwrap();
-    assert!(fixed.contains("軟體"), "aggressive should fix 軟件→軟體");
-    assert!(fixed.contains("影片"), "aggressive should fix 視頻→影片");
+    assert!(
+        fixed.contains("軟體"),
+        "lexical_contextual should fix 軟件→軟體"
+    );
+    assert!(
+        fixed.contains("程式碼"),
+        "lexical_contextual should fix 代碼→程式碼 (clue-gated, 編譯 present)"
+    );
     assert!(output["applied_fixes"].as_u64().unwrap() >= 2);
 
     // -- E2E: oversized request rejected by MAX_TEXT_BYTES --
@@ -619,7 +627,7 @@ fn e2e_initialize_and_tools_list() {
                 "arguments": {
                     "text": "這個軟件很好",
                     "output": "compact",
-                    "fix_mode": "safe"
+                    "fix_mode": "lexical_safe"
                 }
             }
         }),

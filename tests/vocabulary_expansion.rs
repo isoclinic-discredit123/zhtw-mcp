@@ -218,23 +218,22 @@ fn context_clues_propagated_to_issue() {
 }
 
 #[test]
-fn fixer_safe_mode_skips_context_clue_rules() {
+fn fixer_lexical_safe_skips_context_clue_rules() {
     use zhtw_mcp::fixer::{apply_fixes, FixMode};
 
     let scanner = full_scanner();
     let text = "我需要編寫一個程序來執行";
     let issues = scanner.scan(text).issues;
-    // Safe mode should skip 程序 because it has context_clues
-    let result = apply_fixes(text, &issues, FixMode::Safe, &[]);
-    // 程序 should NOT be replaced in safe mode (ambiguous)
+    // LexicalSafe should skip 程序 because it has context_clues
+    let result = apply_fixes(text, &issues, FixMode::LexicalSafe, &[]);
     assert!(
         result.text.contains("程序"),
-        "Safe mode should not replace 程序 (has context_clues)"
+        "LexicalSafe should not replace 程序 (has context_clues)"
     );
 }
 
 #[test]
-fn fixer_aggressive_with_segmenter_applies_when_clues_match() {
+fn fixer_lexical_contextual_with_segmenter_applies_when_clues_match() {
     use zhtw_mcp::engine::segment::Segmenter;
     use zhtw_mcp::fixer::{apply_fixes_with_context, FixMode};
 
@@ -243,19 +242,23 @@ fn fixer_aggressive_with_segmenter_applies_when_clues_match() {
     let scanner = Scanner::new(ruleset.spelling_rules.clone(), ruleset.case_rules);
     let segmenter = Segmenter::from_rules(&ruleset.spelling_rules);
 
-    // Text with enough clue words: 編寫 and 執行 are both clues for 程序->程式
     let text = "我需要編寫一個程序來執行";
     let issues = scanner.scan(text).issues;
-    let result =
-        apply_fixes_with_context(text, &issues, FixMode::Aggressive, &[], Some(&segmenter));
+    let result = apply_fixes_with_context(
+        text,
+        &issues,
+        FixMode::LexicalContextual,
+        &[],
+        Some(&segmenter),
+    );
     assert!(
         result.text.contains("程式"),
-        "Aggressive mode with segmenter should replace 程序->程式 when clues match"
+        "LexicalContextual with segmenter should replace 程序->程式 when clues match"
     );
 }
 
 #[test]
-fn fixer_aggressive_with_segmenter_skips_when_no_clues() {
+fn fixer_lexical_contextual_with_segmenter_skips_when_no_clues() {
     use zhtw_mcp::engine::segment::Segmenter;
     use zhtw_mcp::fixer::{apply_fixes_with_context, FixMode};
 
@@ -264,15 +267,18 @@ fn fixer_aggressive_with_segmenter_skips_when_no_clues() {
     let scanner = Scanner::new(ruleset.spelling_rules.clone(), ruleset.case_rules);
     let segmenter = Segmenter::from_rules(&ruleset.spelling_rules);
 
-    // Text without clue words -- "程序" in a non-programming context
     let text = "這個程序很複雜";
     let issues = scanner.scan(text).issues;
-    let result =
-        apply_fixes_with_context(text, &issues, FixMode::Aggressive, &[], Some(&segmenter));
-    // Should NOT replace because insufficient context clues
+    let result = apply_fixes_with_context(
+        text,
+        &issues,
+        FixMode::LexicalContextual,
+        &[],
+        Some(&segmenter),
+    );
     assert!(
         result.text.contains("程序"),
-        "Aggressive mode should skip 程序 when context clues are insufficient"
+        "LexicalContextual should skip 程序 when context clues are insufficient"
     );
 }
 

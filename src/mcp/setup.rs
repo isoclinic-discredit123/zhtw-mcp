@@ -24,7 +24,7 @@ Read `zh-tw://style-guide/moe` resource for full conventions.
 ### Quality Gate
 
 ```
-zhtw({ "text": "...", "fix_mode": "safe", "max_errors": 0, "output": "compact" })
+zhtw({ "text": "...", "fix_mode": "lexical_safe", "max_errors": 0, "output": "compact" })
 ```
 
 Re-run until `accepted: true`. Use `output: "compact"` to save context tokens."#
@@ -52,7 +52,7 @@ steps:
     tool: zhtw
     arguments:
       text: "{{content}}"
-      fix_mode: "safe"
+      fix_mode: "lexical_safe"
       max_errors: 0
       content_type: "{{if file_ext == 'md'}}markdown{{else}}plain{{end}}"
       profile: "default"
@@ -94,7 +94,7 @@ Use Taiwan-standard terms, not Mainland China equivalents:
 
 ## MCP Server
 The zhtw-mcp server provides automated zh-TW linting and fixing.
-Use `zhtw` with `fix_mode: "safe"` and `max_errors: 0` as a quality gate before committing Chinese text."#
+Use `zhtw` with `fix_mode: "lexical_safe"` and `max_errors: 0` as a quality gate before committing Chinese text."#
         .to_string();
 
     let vscode_settings = r#"{
@@ -183,7 +183,7 @@ The zhtw-mcp MCP server is available for automated enforcement.
 ## Tool Usage
 Use `zhtw` for linting, fixing, and gating zh-TW text:
 - Lint: `zhtw({ "text": "...", "content_type": "markdown" })`
-- Fix:  `zhtw({ "text": "...", "fix_mode": "safe", "max_errors": 0 })`
+- Fix:  `zhtw({ "text": "...", "fix_mode": "lexical_safe", "max_errors": 0 })`
 - Gate: `zhtw({ "text": "...", "max_errors": 0 })` — fails if errors > 0
 
 ## Key Conventions
@@ -207,7 +207,7 @@ All Chinese text must follow Taiwan MoE (教育部) standards.
 The zhtw-mcp MCP server provides automated zh-TW linting and fixing.
 
 ## MCP Tool: zhtw
-- `zhtw({ "text": "...", "fix_mode": "safe", "max_errors": 0 })`
+- `zhtw({ "text": "...", "fix_mode": "lexical_safe", "max_errors": 0 })`
 - Profiles: default, strict_moe, ui_strings
 - Content types: plain, markdown
 
@@ -231,7 +231,7 @@ zhtw-mcp provides `zhtw` for Traditional Chinese (Taiwan) text enforcement.
 
 ## Workflow
 1. When generating Chinese text, use Taiwan-standard vocabulary
-2. Before finalizing, run: `zhtw({ "text": "...", "fix_mode": "safe", "max_errors": 0 })`
+2. Before finalizing, run: `zhtw({ "text": "...", "fix_mode": "lexical_safe", "max_errors": 0 })`
 3. If `accepted: false`, fix remaining issues and re-check
 
 ## Quick Reference
@@ -271,7 +271,7 @@ The single unified tool for linting, fixing, and gating zh-TW text.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | text | string | (required) | Text to check |
-| fix_mode | string | "none" | "none", "safe", or "aggressive" |
+| fix_mode | string | "none" | "none", "orthographic", "lexical_safe", or "lexical_contextual" |
 | max_errors | integer | (none) | Gate: reject if errors exceed this |
 | profile | string | "default" | "default", "strict_moe", "ui_strings" |
 | content_type | string | "plain" | "plain" or "markdown" |
@@ -281,7 +281,7 @@ The single unified tool for linting, fixing, and gating zh-TW text.
 
 ### Workflow
 1. Lint: `zhtw({ "text": "...", "content_type": "markdown" })`
-2. Fix:  `zhtw({ "text": "...", "fix_mode": "safe" })`
+2. Fix:  `zhtw({ "text": "...", "fix_mode": "lexical_safe" })`
 3. Gate: `zhtw({ "text": "...", "max_errors": 0 })` — accepted=false if errors>0
 
 ### MCP Resources

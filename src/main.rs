@@ -164,11 +164,20 @@ fn main() -> Result<()> {
                             exclude_patterns
                                 .push(args.get(i).context("--exclude requires a pattern")?.clone());
                         }
-                        "--fix" | "--fix=safe" => {
-                            fix_mode = Some(zhtw_mcp::fixer::FixMode::Safe);
+                        "--fix" | "--fix=lexical_safe" => {
+                            fix_mode = Some(zhtw_mcp::fixer::FixMode::LexicalSafe);
                         }
-                        "--fix=aggressive" => {
-                            fix_mode = Some(zhtw_mcp::fixer::FixMode::Aggressive);
+                        "--fix=orthographic" => {
+                            fix_mode = Some(zhtw_mcp::fixer::FixMode::Orthographic);
+                        }
+                        "--fix=lexical_contextual" => {
+                            fix_mode = Some(zhtw_mcp::fixer::FixMode::LexicalContextual);
+                        }
+                        arg if arg.starts_with("--fix=") => {
+                            anyhow::bail!(
+                                "unknown fix mode: {} (expected 'orthographic', 'lexical_safe', or 'lexical_contextual')",
+                                &arg[6..]
+                            );
                         }
                         "--dry-run" => {
                             dry_run = true;
@@ -1240,7 +1249,7 @@ fn run_convert(
         let fix_result = apply_fixes_with_context(
             &text,
             &issues,
-            FixMode::Aggressive,
+            FixMode::LexicalContextual,
             &excluded_pairs,
             Some(scanner.segmenter()),
         );

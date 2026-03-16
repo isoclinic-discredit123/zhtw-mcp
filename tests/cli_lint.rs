@@ -789,3 +789,17 @@ fn cli_lint_grammar_disabled_in_ui_strings_profile() {
         "ui_strings profile should not produce grammar issues: {stdout}"
     );
 }
+
+#[test]
+fn cli_lint_fix_bogus_rejected() {
+    let output = run_lint_args(&["--fix=bogus", "dummy.txt"]);
+    assert!(
+        !output.status.success(),
+        "--fix=bogus should fail with non-zero exit"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown fix mode"),
+        "should report unknown fix mode, got: {stderr}"
+    );
+}

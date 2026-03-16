@@ -6,10 +6,7 @@ zhtw-mcp MCP tools, then checks stdout for expected keywords to confirm
 correct zh-TW output.
 
 Tools exercised:
-  - zh_check (lint, fix, gate, explain, compact, political_stance, aggressive)
-  - zh_list_packs
-  - zh_list_rules
-  - zh_add_rule / zh_remove_rule (round-trip)
+  - zhtw (lint, fix, gate, explain, compact, political_stance, lexical_contextual)
 
 Usage:
     python3 scripts/test-mcp-qwen.py            # run all tests
@@ -65,11 +62,11 @@ class TestCase:
 
 
 TESTS: list[TestCase] = [
-    # ---- zh_check: lint only (fix_mode absent -> none) ----
+    # ---- zhtw: lint only (fix_mode absent -> none) ----
     TestCase(
         name="lint_basic",
         prompt=(
-            "使用 zh_check 工具檢查以下文字（不要設 fix_mode），"
+            "使用 zhtw 工具檢查以下文字（不要設 fix_mode），"
             "只列出問題和建議修正，用表格格式回答：\n"
             "「軟體工程師需要優化數據庫的性能，通過調試程序來排查代碼中的問題。」"
         ),
@@ -77,33 +74,33 @@ TESTS: list[TestCase] = [
         expect_any=["數據庫", "性能", "調試", "代碼"],
         timeout=60,
     ),
-    # ---- zh_check: strict_moe profile ----
+    # ---- zhtw: strict_moe profile ----
     TestCase(
         name="lint_strict_moe",
         prompt=(
-            "使用 zh_check 工具，profile 設為 strict_moe，"
+            "使用 zhtw 工具，profile 設為 strict_moe，"
             "檢查：「應用程式需要讀取數據並進行網絡通訊。」\n"
             "只列出問題和建議。"
         ),
         expect_any=["資料", "數據", "網路", "網絡"],
         timeout=60,
     ),
-    # ---- zh_check: fix_mode safe ----
+    # ---- zhtw: fix_mode lexical_safe ----
     TestCase(
         name="fix_safe",
         prompt=(
-            "使用 zh_check 工具，fix_mode 設為 safe，修正以下文字：\n"
+            "使用 zhtw 工具，fix_mode 設為 lexical_safe，修正以下文字：\n"
             "「開發人員利用調試工具來優化軟件的性能。」\n"
             "只回答修正後的完整文字。"
         ),
         expect_all=["除錯", "軟體", "效能"],
         timeout=60,
     ),
-    # ---- zh_check: gate pass ----
+    # ---- zhtw: gate pass ----
     TestCase(
         name="gate_pass",
         prompt=(
-            "使用 zh_check 工具，fix_mode=safe，max_errors=0，"
+            "使用 zhtw 工具，fix_mode=lexical_safe，max_errors=0，"
             "處理：「軟體工程師使用資料庫來開發應用程式。」\n"
             "只回答 accepted 值（true/false）。"
         ),
@@ -111,22 +108,22 @@ TESTS: list[TestCase] = [
         reject_any=["false", "reject", "拒絕"],
         timeout=60,
     ),
-    # ---- zh_check: gate reject ----
+    # ---- zhtw: gate reject ----
     TestCase(
         name="gate_reject",
         prompt=(
-            "使用 zh_check 工具，fix_mode=safe，max_errors=0，"
+            "使用 zhtw 工具，fix_mode=lexical_safe，max_errors=0，"
             "處理：「開發人員優化軟件性能並調試代碼。」\n"
             "只回答 accepted 值和剩餘 errors 數量。"
         ),
         expect_any=["false", "reject", "拒絕", "error", "錯誤"],
         timeout=60,
     ),
-    # ---- zh_check: ignore_terms ----
+    # ---- zhtw: ignore_terms ----
     TestCase(
         name="ignore_terms",
         prompt=(
-            '使用 zh_check 工具，ignore_terms=["軟件"]，'
+            '使用 zhtw 工具，ignore_terms=["軟件"]，'
             "檢查：「這個軟件很好用」\n"
             "只回答軟件這個詞的 severity 值。"
         ),
@@ -134,11 +131,11 @@ TESTS: list[TestCase] = [
         reject_any=["warning"],
         timeout=60,
     ),
-    # ---- zh_check: markdown content_type ----
+    # ---- zhtw: markdown content_type ----
     TestCase(
         name="markdown_exclusion",
         prompt=(
-            "使用 zh_check 工具，content_type=markdown，"
+            "使用 zhtw 工具，content_type=markdown，"
             "檢查：「這個軟件很好用\n\n```\n軟件代碼\n```\n\n軟件很棒」\n"
             "回答：code block 內容是否被排除？共幾個 issues？"
         ),
@@ -147,11 +144,11 @@ TESTS: list[TestCase] = [
         # 3 occurrences exist but only 2 are issues after code-block exclusion.
         timeout=120,
     ),
-    # ---- zh_check: return shape ----
+    # ---- zhtw: return shape ----
     TestCase(
         name="return_shape",
         prompt=(
-            "使用 zh_check 工具，fix_mode=safe，max_errors=5，"
+            "使用 zhtw 工具，fix_mode=lexical_safe，max_errors=5，"
             "處理：「這個軟件用了很多內存」\n"
             "只列出回傳結果中 accepted、applied_fixes、summary、gate 的值。"
         ),
@@ -159,11 +156,11 @@ TESTS: list[TestCase] = [
         expect_all=["applied_fixes", "summary", "gate"],
         timeout=60,
     ),
-    # ---- zh_check: explain mode ----
+    # ---- zhtw: explain mode ----
     TestCase(
         name="explain_mode",
         prompt=(
-            "使用 zh_check 工具，explain=true，"
+            "使用 zhtw 工具，explain=true，"
             "檢查：「這個軟件的性能很差」\n"
             "列出每個 issue 的 explanation 欄位內容。"
         ),
@@ -180,33 +177,33 @@ TESTS: list[TestCase] = [
         ],
         timeout=60,
     ),
-    # ---- zh_check: political_stance neutral ----
+    # ---- zhtw: political_stance neutral ----
     TestCase(
         name="political_neutral",
         prompt=(
-            "使用 zh_check 工具，political_stance=neutral，"
+            "使用 zhtw 工具，political_stance=neutral，"
             "檢查：「大陸的經濟發展很快」\n"
             "只回答 issues 數量。"
         ),
         expect_any=["0", "沒有", "no issue", "無"],
         timeout=60,
     ),
-    # ---- zh_check: output compact ----
+    # ---- zhtw: output compact ----
     TestCase(
         name="output_compact",
         prompt=(
-            "使用 zh_check 工具，output=compact，"
+            "使用 zhtw 工具，output=compact，"
             "檢查：「軟件性能優化和數據庫調試」\n"
             "只列出每個 issue 的 found 和 suggestions，不要解釋。"
         ),
         expect_any=["軟體", "效能", "資料庫", "除錯"],
         timeout=60,
     ),
-    # ---- zh_check: fix_mode aggressive ----
+    # ---- zhtw: fix_mode lexical_contextual ----
     TestCase(
-        name="fix_aggressive",
+        name="fix_lexical_contextual",
         prompt=(
-            "使用 zh_check 工具，fix_mode=aggressive，"
+            "使用 zhtw 工具，fix_mode=lexical_contextual，"
             "修正：「軟件工程師優化數據庫性能並調試代碼」\n"
             "只回答修正後文字。"
         ),
@@ -215,37 +212,6 @@ TESTS: list[TestCase] = [
         expect_all=["效能", "除錯"],
         expect_any=["軟體", "程式碼", "資料庫", "最佳化"],
         timeout=60,
-    ),
-    # ---- zh_list_packs ----
-    TestCase(
-        name="list_packs",
-        prompt=(
-            "使用 zh_list_packs 工具列出所有 rule packs。" "只回答 pack 名稱列表。"
-        ),
-        expect_any=["pack", "packs", "default", "strict_moe", "規則", "rule"],
-        timeout=60,
-    ),
-    # ---- zh_list_rules ----
-    TestCase(
-        name="list_rules",
-        prompt=(
-            "使用 zh_list_rules 工具列出使用者自訂規則。" "只回答規則列表或「無規則」。"
-        ),
-        expect_any=["rule", "規則", "override", "覆寫", "無", "empty", "no ", "0"],
-        timeout=60,
-    ),
-    # ---- rule authoring round-trip: add -> check -> remove ----
-    TestCase(
-        name="rule_roundtrip",
-        prompt=(
-            "請依序執行以下三步：\n"
-            '1. 使用 zh_add_rule 新增規則：from="測試詞彙" to="正確詞彙"\n'
-            "2. 使用 zh_check 檢查「這是測試詞彙」確認規則生效\n"
-            "3. 使用 zh_remove_rule 刪除剛才新增的規則\n"
-            "每步只回答結果。"
-        ),
-        expect_any=["正確詞彙", "新增", "add", "remove", "刪除", "測試詞彙"],
-        timeout=120,
     ),
 ]
 
@@ -470,7 +436,7 @@ def mcp_health_check(timeout: int = 15) -> HealthResult:
     Tests the full protocol stack without requiring qwen:
     1. initialize handshake (protocol version, server capabilities)
     2. tools/list (verify all 5 tools registered)
-    3. tools/call zh_check with a known-bad input (verify issue detection)
+    3. tools/call zhtw with a known-bad input (verify issue detection)
     4. graceful shutdown
     """
     result = HealthResult(ok=False)
@@ -601,42 +567,38 @@ def mcp_health_check(timeout: int = 15) -> HealthResult:
             result.tools = [t.get("name", "") for t in tools]
 
             expected_tools = {
-                "zh_check",
-                "zh_list_packs",
-                "zh_add_rule",
-                "zh_remove_rule",
-                "zh_list_rules",
+                "zhtw",
             }
             missing = expected_tools - set(result.tools)
             if missing:
                 result.errors.append(f"missing tools: {sorted(missing)}")
                 return result
 
-            # Step 4: tools/call -- verify zh_check produces a valid issue
+            # Step 4: tools/call -- verify zhtw produces a valid issue
             send(
                 _jsonrpc_request(
                     "tools/call",
                     {
-                        "name": "zh_check",
+                        "name": "zhtw",
                         "arguments": {"text": "這個軟件很好用"},
                     },
                     req_id=3,
                 )
             )
-            resp = recv("tools/call zh_check")
+            resp = recv("tools/call zhtw")
             if "error" in resp:
-                result.errors.append(f"zh_check call error: {resp['error']}")
+                result.errors.append(f"zhtw call error: {resp['error']}")
                 return result
 
             content = resp.get("result", {}).get("content", [])
             if not content:
-                result.errors.append("zh_check returned empty content")
+                result.errors.append("zhtw returned empty content")
                 return result
 
             try:
                 output = json.loads(content[0].get("text", "{}"))
             except json.JSONDecodeError as e:
-                result.errors.append(f"zh_check output not valid JSON: {e}")
+                result.errors.append(f"zhtw output not valid JSON: {e}")
                 return result
 
             issues = output.get("issues", [])
@@ -650,7 +612,7 @@ def mcp_health_check(timeout: int = 15) -> HealthResult:
                     f"expected 軟件 issue, got {len(issues)} issue(s)"
                 )
                 # Not a fatal error -- tool responded, just unexpected output
-                result.errors.append(f"zh_check validation: {result.tool_check_detail}")
+                result.errors.append(f"zhtw validation: {result.tool_check_detail}")
 
             result.ok = len(result.errors) == 0
 
@@ -694,7 +656,7 @@ def print_health_report(hr: HealthResult) -> None:
         print(f"  [OK] protocol: {hr.protocol_version}")
         print(f"  [OK] tools: {', '.join(hr.tools)} ({len(hr.tools)} registered)")
         tag = "OK" if hr.tool_check_ok else "WARN"
-        print(f"  [{tag}] zh_check: {hr.tool_check_detail}")
+        print(f"  [{tag}] zhtw: {hr.tool_check_detail}")
         print(f"  [OK] healthy ({hr.elapsed:.1f}s)")
     else:
         for err in hr.errors:
@@ -754,8 +716,8 @@ def check_mcp_binary() -> tuple[bool, str]:
 
 
 def smoke_test(timeout: int = 45) -> tuple[bool, str]:
-    """Run a minimal zh_check invocation to verify MCP server connectivity."""
-    prompt = "使用 zh_check 工具檢查「測試」，只回答 issue 數量"
+    """Run a minimal zhtw invocation to verify MCP server connectivity."""
+    prompt = "使用 zhtw 工具檢查「測試」，只回答 issue 數量"
     try:
         with subprocess.Popen(
             ["qwen", "-y", "-p", prompt],

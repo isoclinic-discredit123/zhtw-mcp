@@ -183,7 +183,7 @@ def measure_fix_output():
                     "name": "zhtw",
                     "arguments": {
                         "text": text,
-                        "fix_mode": "safe",
+                        "fix_mode": "lexical_safe",
                         "fix_output": "full",
                     },
                 },
@@ -196,7 +196,7 @@ def measure_fix_output():
                     "name": "zhtw",
                     "arguments": {
                         "text": text,
-                        "fix_mode": "safe",
+                        "fix_mode": "lexical_safe",
                         "fix_output": "search_replace",
                     },
                 },
@@ -209,7 +209,7 @@ def measure_fix_output():
                     "name": "zhtw",
                     "arguments": {
                         "text": text,
-                        "fix_mode": "safe",
+                        "fix_mode": "lexical_safe",
                         "fix_output": "patch",
                     },
                 },
@@ -330,7 +330,7 @@ def measure_combined():
                     "arguments": {
                         "text": text,
                         "output": "full",
-                        "fix_mode": "safe",
+                        "fix_mode": "lexical_safe",
                         "fix_output": "full",
                     },
                 },
@@ -345,7 +345,7 @@ def measure_combined():
                     "arguments": {
                         "text": text,
                         "output": "tabular",
-                        "fix_mode": "safe",
+                        "fix_mode": "lexical_safe",
                         "fix_output": "search_replace",
                     },
                 },

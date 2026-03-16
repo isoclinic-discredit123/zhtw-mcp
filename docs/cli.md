@@ -21,8 +21,9 @@ zhtw-mcp lint -- --content-type markdown < input.md
 ## Auto-fix
 
 ```bash
-zhtw-mcp lint file.md --fix                 # safe mode (default)
-zhtw-mcp lint file.md --fix=aggressive      # context-clue-gated rules too
+zhtw-mcp lint file.md --fix                        # lexical_safe (default)
+zhtw-mcp lint file.md --fix=orthographic           # punctuation/spacing/case/variant/grammar only
+zhtw-mcp lint file.md --fix=lexical_contextual     # context-clue-gated rules too
 zhtw-mcp lint file.md --fix --dry-run       # preview without writing
 ```
 
