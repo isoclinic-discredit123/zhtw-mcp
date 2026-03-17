@@ -396,22 +396,64 @@ def verify_terms(
     return warnings, net_errors
 
 
+# Valid @domain labels (canonical single-label taxonomy).
+VALID_DOMAINS = {
+    "IT",
+    "UI",
+    "程式設計",
+    "作業系統",
+    "硬體",
+    "電子",
+    "網路",
+    "通訊",
+    "資安",
+    "資料結構",
+    "資料庫",
+    "資料",
+    "雲端",
+    "數學",
+    "科學",
+    "語言學",
+    "醫學",
+    "金融",
+    "商業",
+    "電商",
+    "社群",
+    "教育",
+    "日常",
+    "圖形",
+    "航太",
+    "文書",
+    "版本控制",
+    "系統程式",
+    "軟體授權",
+    "生物學",
+    "能源",
+    "材料",
+}
+
+# Valid @geo sub-types.
+VALID_GEO_TYPES = {"country", "city", "landmark", "university"}
+
+
 def detect_conflicts(spelling_rules: list[dict[str, Any]]) -> list[str]:
     """Detect semantic conflicts between spelling rules.
 
     Skips disabled rules.  Returns a list of warning strings for:
-    1. Circular mappings (to of rule A is from of rule B)
-    2. Empty to without english fallback
-    3. Variant rule invariants (single non-empty to)
-    4. Orphaned seealso references in context fields
-    5. AC compound decomposition conflicts (individual rules would produce
-       wrong output for a compound term that lacks its own rule)
-    6. Suggestion-is-from conflicts (a rule's to[] value is another rule's
-       from, creating unintended re-flagging)
-    7. Schema validation (required fields, valid types, unknown keys)
-    8. Compound suffix preservation (longer rules must not drop suffixes
-       that the base rule would preserve)
-    9. context_clues / negative_context_clues field validation
+    1.  Circular mappings (to of rule A is from of rule B)
+    2.  Empty to without english fallback
+    3.  Variant rule invariants (single non-empty to)
+    4.  Orphaned seealso references in context fields
+    5.  AC compound decomposition conflicts (individual rules would produce
+        wrong output for a compound term that lacks its own rule)
+    6.  Suggestion-is-from conflicts (a rule's to[] value is another rule's
+        from, creating unintended re-flagging)
+    7.  Schema validation (required fields, valid types, unknown keys)
+    8.  Compound suffix preservation (longer rules must not drop suffixes
+        that the base rule would preserve)
+    9.  context_clues / negative_context_clues field validation
+    10. Self-referencing to (from value appears in its own to array)
+    11. Annotation validation (@domain/@geo tag format and coverage)
     """
     warnings: list[str] = []
 
@@ -655,6 +697,127 @@ def detect_conflicts(spelling_rules: list[dict[str, Any]]) -> list[str]:
             warnings.append(
                 f'clue-overlap: "{frm}" has terms in both context_clues '
                 f"and negative_context_clues: {sorted(overlap)}"
+            )
+
+    # 10. Self-referencing to: from value must not appear in its own to array.
+    for rule in from_set.values():
+        frm = rule["from"]
+        if frm in rule.get("to", []):
+            warnings.append(
+                f'self-ref: "{frm}" appears in its own to array '
+                f"(identity suggestion)"
+            )
+
+    # 11. Annotation validation: @domain and @geo tags.
+    #
+    # Rules that use structured annotations:
+    #   @geo TYPE (LABEL)        -- geographic entities
+    #   @domain LABEL            -- domain-specific terms
+    #   @domain LABEL。note      -- domain + disambiguation
+    #
+    # cross_strait rules must have one of: @domain, @geo, (@seealso ...),
+    # or compound: prefix.  Bare prose without a structured tag is flagged.
+    # Anchored: after the tag, only 。(note) or end-of-string is valid.
+    geo_re = re.compile(r"^@geo\s+(\w+)\s*(?:\([^)]*\))?\s*(?:。|$)")
+    domain_re = re.compile(r"^@domain\s+([^。\s]+)\s*(?:。|$)")
+
+    for rule in from_set.values():
+        frm = rule["from"]
+        ctx = rule.get("context", "")
+        rtype = rule.get("type", "")
+
+        # Only cross_strait rules need annotation.
+        if rtype != "cross_strait":
+            continue
+
+        # Check @geo format.
+        geo_m = geo_re.match(ctx)
+        if geo_m:
+            geo_type = geo_m.group(1)
+            if geo_type not in VALID_GEO_TYPES:
+                warnings.append(
+                    f'geo-type: "{frm}" has unknown @geo type '
+                    f'"{geo_type}" (valid: {", ".join(sorted(VALID_GEO_TYPES))})'
+                )
+            continue  # has @geo -- skip further annotation checks
+
+        # Detect malformed @geo (starts with @geo but regex didn't match).
+        if ctx.startswith("@geo"):
+            warnings.append(
+                f'geo-malformed: "{frm}" has malformed @geo tag: ' f'"{ctx[:40]}"'
+            )
+            continue
+
+        # Check @domain format.
+        dom_m = domain_re.match(ctx)
+        if dom_m:
+            domain = dom_m.group(1)
+            if domain not in VALID_DOMAINS:
+                warnings.append(
+                    f'domain-label: "{frm}" has unknown @domain ' f'"{domain}"'
+                )
+            continue  # has @domain -- skip further annotation checks
+
+        # Detect malformed @domain (starts with @domain but regex didn't match).
+        if ctx.startswith("@domain"):
+            warnings.append(
+                f'domain-malformed: "{frm}" has malformed @domain tag: ' f'"{ctx[:40]}"'
+            )
+            continue
+
+        # Other structured annotations: (@seealso ...) and compound: are
+        # acceptable without a @domain/@geo prefix.  Match the actual
+        # (@seealso REF) syntax, not a bare substring.
+        if "(@seealso " in ctx or ctx.startswith("compound:"):
+            continue
+
+        # cross_strait rules must have a structured annotation tag.
+        # Bare prose context without @domain/@geo is flagged so new rules
+        # are required to declare their domain explicitly.
+        warnings.append(
+            f'annotation-missing: "{frm}" has no @domain/@geo tag'
+            + (f' (context: "{ctx[:30]}...")' if ctx.strip() else "")
+        )
+
+    # Duplicate @geo: same to[0] from multiple from values.
+    # OpenCC character variants (裡/里, 羣/群, 託/托) intentionally produce
+    # duplicate from→to mappings so both text forms are caught.  Only flag
+    # true duplicates where the from values are identical or differ by more
+    # than single-character variant swaps.
+    geo_to_map: dict[str, list[str]] = {}
+    for rule in from_set.values():
+        ctx = rule.get("context", "")
+        if not ctx.startswith("@geo"):
+            continue
+        targets = [t for t in rule.get("to", []) if t]
+        if targets:
+            geo_to_map.setdefault(targets[0], []).append(rule["from"])
+    for to_val, froms in geo_to_map.items():
+        if len(froms) <= 1:
+            continue
+        # Check if all pairs differ by only single-char substitutions
+        # (OpenCC variant pairs like 裡/里).  If so, it is intentional.
+        # NOTE: this is a Hamming-distance heuristic, not true OpenCC
+        # normalization.  It tolerates ≤2 char diffs at equal length.
+        # For geographic names this is sufficient — two unrelated countries
+        # with same-length names differing by ≤2 chars is not realistic.
+        is_variant_pair = True
+        for i in range(len(froms)):
+            for j in range(i + 1, len(froms)):
+                a, b = froms[i], froms[j]
+                if len(a) != len(b):
+                    is_variant_pair = False
+                    break
+                diffs = sum(1 for x, y in zip(a, b) if x != y)
+                if diffs > 2:  # allow up to 2 char differences
+                    is_variant_pair = False
+                    break
+            if not is_variant_pair:
+                break
+        if not is_variant_pair:
+            warnings.append(
+                f'geo-duplicate: {froms} all map to "{to_val}" '
+                f"(redundant @geo rules)"
             )
 
     return warnings
