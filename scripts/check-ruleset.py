@@ -454,6 +454,9 @@ def detect_conflicts(spelling_rules: list[dict[str, Any]]) -> list[str]:
     9.  context_clues / negative_context_clues field validation
     10. Self-referencing to (from value appears in its own to array)
     11. Annotation validation (@domain/@geo tag format and coverage)
+    12. Redundant domain constraint (限X語境 duplicates @domain X)
+    13. Ungated domain constraint (限...語境 without context_clues/exceptions)
+    14. ai_filler trailing punctuation (scanner handles it automatically)
     """
     warnings: list[str] = []
 
@@ -819,6 +822,70 @@ def detect_conflicts(spelling_rules: list[dict[str, Any]]) -> list[str]:
                 f'geo-duplicate: {froms} all map to "{to_val}" '
                 f"(redundant @geo rules)"
             )
+
+    # 12. Redundant domain constraint: @domain X + 限X語境 in the same
+    #     context is redundant — the @domain tag already declares the domain.
+    for rule in from_set.values():
+        frm = rule["from"]
+        ctx = rule.get("context", "")
+        dom_m = domain_re.match(ctx)
+        if not dom_m:
+            continue
+        domain = dom_m.group(1)
+        if f"限{domain}語境" in ctx:
+            warnings.append(
+                f'domain-redundant: "{frm}" has @domain {domain} '
+                f"and redundant 限{domain}語境"
+            )
+
+    # 13. Ungated domain constraint: context says 限...語境 but the rule
+    #     lacks context_clues, negative_context_clues, and exceptions to
+    #     enforce it.  This is a latent false-positive bug per CLAUDE.md
+    #     conventions.  Rules with negative_context_clues are considered
+    #     gated (they fire by default and are suppressed in wrong contexts).
+    limit_re = re.compile(r"限[^。]+語境")
+    for rule in from_set.values():
+        frm = rule["from"]
+        ctx = rule.get("context", "")
+        if not limit_re.search(ctx):
+            continue
+        has_clues = bool(rule.get("context_clues"))
+        has_neg_clues = bool(rule.get("negative_context_clues"))
+        has_exceptions = bool(rule.get("exceptions"))
+        if not has_clues and not has_neg_clues and not has_exceptions:
+            m = limit_re.search(ctx)
+            constraint = m.group(0) if m else "?"
+            warnings.append(
+                f'ungated-constraint: "{frm}" says "{constraint}" '
+                f"but has no context_clues or exceptions"
+            )
+
+    # 14. ai_filler trailing punctuation: the scanner extends deletion
+    #     spans (is_deletion_rule: to == [""]) to consume trailing ，/：
+    #     automatically.  Separate rules for phrase+punctuation variants
+    #     are redundant only when the base rule is a deletion rule.
+    #     Replacement ai_filler rules (to == ["總之"] etc.) do NOT get
+    #     automatic trailing-punctuation handling.
+    ai_filler_deletion_from = {
+        r["from"]
+        for r in from_set.values()
+        if r.get("type") == "ai_filler"
+        and len(r.get("to", [])) == 1
+        and r["to"][0] == ""
+    }
+    for rule in from_set.values():
+        if rule.get("type") != "ai_filler":
+            continue
+        frm = rule["from"]
+        if frm.endswith("\uff0c") or frm.endswith("\uff1a"):  # ， or ：
+            base = frm[:-1]
+            if base in ai_filler_deletion_from:
+                punct = frm[-1]
+                warnings.append(
+                    f'ai-filler-punct: "{frm}" is redundant — '
+                    f'base rule "{base}" is a deletion rule and scanner '
+                    f"auto-consumes trailing {punct}"
+                )
 
     return warnings
 

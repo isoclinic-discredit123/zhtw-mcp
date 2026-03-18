@@ -903,7 +903,12 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                         };
                         let sev = issue.severity.name();
                         let rule_name = issue.rule_type.name();
-                        let suggestions = issue.suggestions.join(", ");
+                        let suggestions =
+                            if issue.suggestions.len() == 1 && issue.suggestions[0].is_empty() {
+                                "(delete)".to_string()
+                            } else {
+                                issue.suggestions.join(", ")
+                            };
                         let verify_tag = match issue.anchor_match {
                             Some(true) => " [verified]",
                             Some(false) => " [unverified]",
@@ -1081,12 +1086,17 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                         tabular_header_printed = true;
                     }
                     for ((found, rt, _, sev), group) in &groups {
-                        let sug_str = group
-                            .suggestions
-                            .iter()
-                            .map(|s| escape_tsv_field(s))
-                            .collect::<Vec<_>>()
-                            .join(",");
+                        let sug_str =
+                            if group.suggestions.len() == 1 && group.suggestions[0].is_empty() {
+                                "(delete)".to_string()
+                            } else {
+                                group
+                                    .suggestions
+                                    .iter()
+                                    .map(|s| escape_tsv_field(s))
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            };
                         // When a file prefix is present, each location
                         // must be individually prefixed so consumers can
                         // parse "file:L:C,file:L:C" tuples correctly.
@@ -1141,7 +1151,13 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                         })
                     });
 
-                    let message = format!("'{}' -> {}", issue.found, issue.suggestions.join(", "));
+                    let sugg_text =
+                        if issue.suggestions.len() == 1 && issue.suggestions[0].is_empty() {
+                            "(delete)".to_string()
+                        } else {
+                            issue.suggestions.join(", ")
+                        };
+                    let message = format!("'{}' -> {}", issue.found, sugg_text);
 
                     sarif_results.push(serde_json::json!({
                         "ruleId": rule_id,

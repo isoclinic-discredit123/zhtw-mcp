@@ -255,21 +255,30 @@ fn remap_issues_to_original(issues: &mut [Issue], original: &str, norm: &Normali
     }
 }
 
-/// Build suggestion list from a rule's to and english fields.
+/// Build suggestion list from a rule's `to` and `english` fields.
 ///
-/// Filters empty strings from to. If no suggestions remain, falls back to
-/// the english field (used when no Chinese translation exists). Avoids
-/// cloning the rule's Vec when the caller only needs the result once.
-fn effective_suggestions(to: &[String], english: &Option<String>) -> Vec<String> {
+/// Filters empty strings from `to`. If no suggestions remain, falls back to
+/// the `english` field (used when no Chinese translation exists).
+///
+/// AiFiller deletion rules (`to: [""]`) are special: the empty string is
+/// the intended suggestion (delete the filler phrase), so it is preserved
+/// as-is instead of being filtered away.
+fn effective_suggestions(rule: &SpellingRule) -> Vec<String> {
+    // AiFiller deletion: to == [""] means 'delete this phrase'.
+    // Preserve the empty-string suggestion so the fixer can apply it.
+    if rule.is_deletion_rule() {
+        return rule.to.clone();
+    }
+    let to = &rule.to;
     // Fast path: most rules have no empty strings in to.
     if !to.is_empty() && to.iter().all(|s| !s.is_empty()) {
-        return to.to_vec();
+        return to.clone();
     }
     let filtered: Vec<String> = to.iter().filter(|s| !s.is_empty()).cloned().collect();
     if !filtered.is_empty() {
         return filtered;
     }
-    match english.as_deref() {
+    match rule.english.as_deref() {
         Some(e) if !e.is_empty() => vec![e.to_string()],
         _ => Vec::new(),
     }
@@ -526,10 +535,8 @@ impl Scanner {
 
         // Precompute effective suggestions for each rule to avoid per-match
         // String allocations in the scan hot path.
-        let spelling_suggestions: Vec<Vec<String>> = spelling_rules
-            .iter()
-            .map(|r| effective_suggestions(&r.to, &r.english))
-            .collect();
+        let spelling_suggestions: Vec<Vec<String>> =
+            spelling_rules.iter().map(effective_suggestions).collect();
 
         let segmenter = Segmenter::from_rules(&spelling_rules);
 

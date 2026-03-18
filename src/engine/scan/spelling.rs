@@ -218,6 +218,23 @@ impl Scanner {
             }
         }
 
+        // AiFiller deletion rules: extend span to consume trailing fullwidth
+        // punctuation (，：) so that a single base rule handles all variants
+        // without leaving dangling punctuation after fix application.
+        // Guard: do not extend into an excluded range (code block, URL).
+        let end = if rule.is_deletion_rule() {
+            match text[end..].chars().next() {
+                Some(c @ ('\u{FF0C}' | '\u{FF1A}'))
+                    if !is_excluded(end, end + c.len_utf8(), excluded) =>
+                {
+                    end + c.len_utf8()
+                }
+                _ => end,
+            }
+        } else {
+            end
+        };
+
         let mut issue = Issue::new(
             start,
             end - start,

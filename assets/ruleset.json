@@ -91,8 +91,9 @@
       "from": "一元操作符",
       "to": ["一元運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "unary operator"
+      "context": "@domain 程式設計",
+      "english": "unary operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "一切皆文件",
@@ -156,8 +157,9 @@
       "from": "下標操作符",
       "to": ["下標運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "subscript operator"
+      "context": "@domain 程式設計",
+      "english": "subscript operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "下溢",
@@ -181,12 +183,6 @@
     },
     {
       "from": "不容忽視的是",
-      "to": [""],
-      "type": "ai_filler",
-      "context": "AI filler phrase; delete"
-    },
-    {
-      "from": "不容忽視的是，",
       "to": [""],
       "type": "ai_filler",
       "context": "AI filler phrase; delete"
@@ -317,7 +313,7 @@
       "from": "事務",
       "to": ["交易"],
       "type": "cross_strait",
-      "context": "@domain 資料庫。限資料庫語境。一般用法「事務」(affairs) 為正確 tw 用法",
+      "context": "@domain 資料庫。一般用法「事務」(affairs) 為正確 tw 用法",
       "english": "transaction",
       "context_clues": ["資料庫", "SQL", "commit", "rollback", "ACID", "交易"]
     },
@@ -325,8 +321,9 @@
       "from": "二元操作符",
       "to": ["二元運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "binary operator"
+      "context": "@domain 程式設計",
+      "english": "binary operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "二分查找",
@@ -353,7 +350,7 @@
       "from": "二維碼",
       "to": ["二維條碼"],
       "type": "cross_strait",
-      "context": "@domain 程式設計",
+      "context": "@domain IT",
       "english": "QR code"
     },
     {
@@ -419,7 +416,7 @@
       "from": "代碼",
       "to": ["程式碼"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境。source code 常被簡寫為 code，因此要翻譯為程式碼。非 IT 語境則該有對應的翻譯",
+      "context": "@domain 程式設計。source code 常被簡寫為 code，因此要翻譯為程式碼。非 IT 語境則該有對應的翻譯",
       "english": "code",
       "context_clues": ["編譯", "函式", "函數", "軟體", "軟件", "開發", "程式", "編寫", "原始碼", "除錯"]
     },
@@ -491,7 +488,7 @@
       "from": "任務管理器",
       "to": ["工作管理員"],
       "type": "cross_strait",
-      "context": "@domain 程式設計",
+      "context": "@domain 作業系統",
       "english": "task manager"
     },
     {
@@ -535,7 +532,8 @@
       "to": ["點陣圖", "位元映射", "位元圖"],
       "type": "cross_strait",
       "context": "@domain 資料結構。限圖形/程式設計語境",
-      "english": "bitmap"
+      "english": "bitmap",
+      "context_clues": ["圖片", "像素", "畫素", "影像", "圖形"]
     },
     {
       "from": "位址分配",
@@ -549,7 +547,8 @@
       "to": ["定址空間"],
       "type": "cross_strait",
       "context": "@domain 作業系統。限 IT 語境",
-      "english": "address space"
+      "english": "address space",
+      "context_clues": ["作業系統", "行程", "執行緒", "排程", "OS"]
     },
     {
       "from": "位域",
@@ -569,8 +568,9 @@
       "from": "位操作",
       "to": ["逐位元操作", "逐位元運算"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "bitwise operation/bit-wise operation"
+      "context": "@domain 程式設計",
+      "english": "bitwise operation/bit-wise operation",
+      "context_clues": ["位元", "mask", "shift", "程式碼"]
     },
     {
       "from": "低級",
@@ -696,6 +696,7 @@
       "type": "cross_strait",
       "context": "@domain IT。tw 「信息」通常指 message (訊息) 或生物學名詞，限 IT 語境",
       "english": "information",
+      "context_clues": ["軟體", "軟件", "資料庫", "網路", "資安"],
       "exceptions": ["信息素"]
     },
     {
@@ -744,14 +745,15 @@
       "from": "修飾符",
       "to": ["修飾子", "修飾詞", "飾詞"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "modifier"
+      "context": "@domain 程式設計",
+      "english": "modifier",
+      "context_clues": ["class", "public", "程式碼", "宣告", "類別"]
     },
     {
       "from": "倉庫",
       "to": ["儲存庫"],
       "type": "cross_strait",
-      "context": "@domain 版本控制。限版本控制語境 (Git repository)。一般語境「倉庫」(warehouse) 為正確 tw 用法",
+      "context": "@domain 版本控制。Git repository；一般語境「倉庫」(warehouse) 為正確 tw 用法",
       "english": "repository",
       "context_clues": ["git", "Git", "GitHub", "clone", "commit", "push", "pull", "版本", "分支", "branch"]
     },
@@ -791,31 +793,7 @@
       "context": "AI filler phrase with zero information content; delete"
     },
     {
-      "from": "值得一提的是，",
-      "to": [""],
-      "type": "ai_filler",
-      "context": "AI filler phrase with zero information content; delete"
-    },
-    {
-      "from": "值得一提的是：",
-      "to": [""],
-      "type": "ai_filler",
-      "context": "AI filler phrase with zero information content; delete"
-    },
-    {
       "from": "值得注意的是",
-      "to": [""],
-      "type": "ai_filler",
-      "context": "AI filler phrase with zero information content; delete"
-    },
-    {
-      "from": "值得注意的是，",
-      "to": [""],
-      "type": "ai_filler",
-      "context": "AI filler phrase with zero information content; delete"
-    },
-    {
-      "from": "值得注意的是：",
       "to": [""],
       "type": "ai_filler",
       "context": "AI filler phrase with zero information content; delete"
@@ -911,30 +889,24 @@
       "context": "Formulaic AI concession phrase; flag but do not auto-delete — it carries contrast meaning that requires rewriting, not deletion"
     },
     {
-      "from": "儘管存在這些挑戰，",
-      "to": [],
-      "type": "ai_filler",
-      "context": "Formulaic AI concession phrase; flag but do not auto-delete — it carries contrast meaning that requires rewriting, not deletion"
-    },
-    {
       "from": "優先級",
       "to": ["優先順序"],
       "type": "cross_strait",
-      "context": "@domain 金融",
+      "context": "@domain 作業系統",
       "english": "priority"
     },
     {
       "from": "優先級反轉",
       "to": ["優先權反轉"],
       "type": "cross_strait",
-      "context": "@domain 金融",
+      "context": "@domain 作業系統",
       "english": "priority inversion"
     },
     {
       "from": "優先級繼承",
       "to": ["優先權繼承"],
       "type": "cross_strait",
-      "context": "priority inheritance 中的 priority 譯為「優先權」而非「優先級」(@seealso 優先順序繼承)",
+      "context": "@domain 作業系統。priority inheritance 中的 priority 譯為「優先權」而非「優先級」(@seealso 優先順序繼承)",
       "english": "priority inheritance"
     },
     {
@@ -948,7 +920,7 @@
       "from": "優先順序繼承",
       "to": ["優先權繼承"],
       "type": "cross_strait",
-      "context": "priority inheritance 中的 priority 譯為「優先權」而非「優先順序」，與 inversion 同理 (@seealso 優先順序反轉)",
+      "context": "@domain 作業系統。priority inheritance 中的 priority 譯為「優先權」而非「優先順序」，與 inversion 同理 (@seealso 優先順序反轉)",
       "english": "priority inheritance"
     },
     {
@@ -1005,7 +977,7 @@
       "from": "元音",
       "to": ["母音"],
       "type": "cross_strait",
-      "context": "@domain 數學",
+      "context": "@domain 語言學",
       "english": "vowel"
     },
     {
@@ -1227,7 +1199,7 @@
       "from": "全局的",
       "to": ["全域的"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
+      "context": "@domain 程式設計",
       "english": "global",
       "context_clues": ["變數", "變量", "函式", "函數", "作用域", "生存空間"]
     },
@@ -1235,8 +1207,9 @@
       "from": "全局範圍解析操作符",
       "to": ["全域生存空間運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "global scope resolution operator"
+      "context": "@domain 程式設計",
+      "english": "global scope resolution operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "全屏",
@@ -1457,8 +1430,9 @@
       "from": "分派",
       "to": ["發派"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "dispatch"
+      "context": "@domain 程式設計",
+      "english": "dispatch",
+      "context_clues": ["函式", "方法", "呼叫", "多型", "事件"]
     },
     {
       "from": "分組框",
@@ -1544,7 +1518,7 @@
       "from": "刷新",
       "to": ["重新整理"],
       "type": "cross_strait",
-      "context": "@domain UI。限 UI 語境。「刷新紀錄」(break a record) 為正確用法，不應替換",
+      "context": "@domain UI。「刷新紀錄」(break a record) 為正確用法，不應替換",
       "english": "refresh",
       "context_clues": ["頁面", "瀏覽器", "網頁", "載入", "加載", "快取", "緩存", "按鈕"]
     },
@@ -1580,7 +1554,7 @@
       "from": "前沿",
       "to": ["尖端", "前瞻", "先進"],
       "type": "cross_strait",
-      "context": "@domain UI。視語境選用：「尖端」(技術)、「前瞻」(研究)、「先進」(一般)",
+      "context": "@domain IT。視語境選用：「尖端」(技術)、「前瞻」(研究)、「先進」(一般)",
       "english": "cutting-edge/frontier"
     },
     {
@@ -1694,15 +1668,16 @@
       "from": "包郵",
       "to": ["含運"],
       "type": "cross_strait",
-      "context": "@domain 金融",
+      "context": "@domain 電商",
       "english": "free shipping"
     },
     {
       "from": "匯編",
       "to": ["組譯"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "assembly"
+      "context": "@domain 程式設計",
+      "english": "assembly",
+      "context_clues": ["指令", "暫存器", "機器碼", "CPU", "組譯"]
     },
     {
       "from": "匯編語言",
@@ -1901,15 +1876,17 @@
       "from": "取地址操作符",
       "to": ["取址運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "address-of operator"
+      "context": "@domain 程式設計",
+      "english": "address-of operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "句柄",
       "to": ["代號", "控制代碼", "控制代號"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境，作為名詞時使用",
-      "english": "handle"
+      "context": "@domain 程式設計。作為名詞時使用",
+      "english": "handle",
+      "context_clues": ["函式", "檔案", "程式碼", "視窗", "資源"]
     },
     {
       "from": "另存為",
@@ -2162,7 +2139,7 @@
       "from": "嚮導",
       "to": ["精靈"],
       "type": "cross_strait",
-      "context": "@domain UI。限 UI 語境。非 UI 語境中「嚮導」仍正確 (如旅遊嚮導)",
+      "context": "@domain UI。非 UI 語境中「嚮導」仍正確 (如旅遊嚮導)",
       "english": "wizard (UI)",
       "context_clues": ["安裝", "設定", "配置", "視窗", "窗口", "步驟", "下一步"]
     },
@@ -2333,19 +2310,7 @@
       "context": "AI filler phrase; simplify to 過程中"
     },
     {
-      "from": "在這個過程中，",
-      "to": ["過程中，"],
-      "type": "ai_filler",
-      "context": "AI filler phrase; simplify to 過程中"
-    },
-    {
       "from": "在這種情況下",
-      "to": [],
-      "type": "ai_filler",
-      "context": "AI filler phrase; flag but do not auto-fix — 此時 is temporal while the original is conditional, changing meaning"
-    },
-    {
-      "from": "在這種情況下，",
       "to": [],
       "type": "ai_filler",
       "context": "AI filler phrase; flag but do not auto-fix — 此時 is temporal while the original is conditional, changing meaning"
@@ -2377,7 +2342,8 @@
       "to": ["定址空間"],
       "type": "cross_strait",
       "context": "@domain 作業系統。限 IT 語境",
-      "english": "address space"
+      "english": "address space",
+      "context_clues": ["作業系統", "行程", "執行緒", "排程", "OS"]
     },
     {
       "from": "坦桑尼亞",
@@ -2475,8 +2441,9 @@
       "from": "基類",
       "to": ["基底類別", "基礎類別"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "base class"
+      "context": "@domain 程式設計",
+      "english": "base class",
+      "context_clues": ["繼承", "衍生", "多型", "類別", "class", "派生"]
     },
     {
       "from": "堆",
@@ -2554,8 +2521,9 @@
       "from": "增加操作符",
       "to": ["累加運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "increment operator"
+      "context": "@domain 程式設計",
+      "english": "increment operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "墻紙",
@@ -2809,8 +2777,9 @@
       "from": "字面量",
       "to": ["字面值", "原詞"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "literal"
+      "context": "@domain 程式設計",
+      "english": "literal",
+      "context_clues": ["常數", "字串", "編譯", "程式碼", "型別", "代碼"]
     },
     {
       "from": "字體",
@@ -2875,7 +2844,8 @@
       "to": ["系統守護行程"],
       "type": "cross_strait",
       "context": "@domain 作業系統。限 Unix 風格之作業系統語境",
-      "english": "daemon"
+      "english": "daemon",
+      "context_clues": ["Linux", "Unix", "背景", "服務", "系統"]
     },
     {
       "from": "安保",
@@ -3006,7 +2976,7 @@
       "from": "實現",
       "to": ["實作"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境 (implement)。非 IT 語境可表示 realize，為正確 tw 用法",
+      "context": "@domain 程式設計。implement 語境；非 IT 語境可表示 realize，為正確 tw 用法",
       "english": "implement",
       "context_clues": ["函式", "函數", "介面", "接口", "程式碼", "代碼", "類別", "方法", "演算法", "算法", "模組", "編譯", "核心", "驅動", "系統呼叫", "API", "IPC"]
     },
@@ -3070,7 +3040,7 @@
       "from": "對象",
       "to": ["物件"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
+      "context": "@domain 程式設計",
       "english": "object",
       "context_clues": ["類別", "屬性", "方法", "繼承", "封裝", "多型", "實例", "程式碼", "代碼", "介面", "函式"],
       "negative_context_clues": ["批評"],
@@ -3152,7 +3122,7 @@
       "from": "局部",
       "to": ["區域性"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境 (local variable/scope)。「局部」(partial/local area) 為標準 tw 用法",
+      "context": "@domain 程式設計。local variable/scope 語境；「局部」(partial/local area) 為標準 tw 用法",
       "english": "local",
       "context_clues": ["變數", "變量", "函式", "函數", "local", "區域", "全域"],
       "negative_context_clues": ["局部細節", "局部最", "局部地區", "局部區域"]
@@ -3175,7 +3145,7 @@
       "from": "局部的",
       "to": ["區域的"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
+      "context": "@domain 程式設計",
       "english": "local",
       "context_clues": ["變數", "變量", "函式", "函數", "作用域", "生存空間"]
     },
@@ -3491,7 +3461,7 @@
       "from": "從節點",
       "to": ["從屬節點"],
       "type": "cross_strait",
-      "context": "@domain IT。限 IT 語境",
+      "context": "@domain IT",
       "english": "secondary node",
       "context_clues": ["主節點", "叢集", "複製", "節點"]
     },
@@ -3571,7 +3541,7 @@
       "from": "恢復",
       "to": ["還原", "復原"],
       "type": "cross_strait",
-      "context": "@domain UI。限 UI 語境。cn「恢復」；tw 用「還原」或「復原」(restore/recover)",
+      "context": "@domain UI。cn「恢復」；tw 用「還原」或「復原」(restore/recover)",
       "english": "restore/recover",
       "context_clues": ["系統", "備份", "預設", "設定", "出廠", "資料"]
     },
@@ -3635,8 +3605,9 @@
       "from": "成員存取操作符",
       "to": ["成員取用運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "member access operator"
+      "context": "@domain 程式設計",
+      "english": "member access operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "成員變量",
@@ -3763,8 +3734,9 @@
       "from": "拋出",
       "to": ["丟出"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "throw (exception)"
+      "context": "@domain 程式設計",
+      "english": "throw (exception)",
+      "context_clues": ["例外", "catch", "try", "throw", "錯誤", "異常"]
     },
     {
       "from": "拒絕服務",
@@ -3814,8 +3786,9 @@
       "from": "指針",
       "to": ["指標"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境，不同於 index",
-      "english": "pointer"
+      "context": "@domain 程式設計。不同於 index",
+      "english": "pointer",
+      "context_clues": ["記憶體", "內存", "位址", "指標", "malloc", "參照"]
     },
     {
       "from": "按值傳遞",
@@ -3878,7 +3851,7 @@
       "from": "接口",
       "to": ["介面"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境。硬體 connector/port = 接頭/連接埠",
+      "context": "@domain 程式設計。硬體 connector/port = 接頭/連接埠",
       "english": "interface",
       "context_clues": ["API", "函數", "函式", "類別", "定義", "實現", "實作", "調用", "呼叫", "軟件", "軟體"]
     },
@@ -3959,7 +3932,7 @@
       "from": "撤銷",
       "to": ["復原"],
       "type": "cross_strait",
-      "context": "@domain UI。限 UI 語境。cn「撤銷」；tw 用「復原」(undo)",
+      "context": "@domain UI。cn「撤銷」；tw 用「復原」(undo)",
       "english": "undo",
       "context_clues": ["復原", "操作", "Ctrl", "上一步", "編輯"]
     },
@@ -4029,7 +4002,7 @@
       "from": "支持",
       "to": ["支援"],
       "type": "cross_strait",
-      "context": "@domain IT。限 IT 語境。「支持」偏指「贊成/背書」(endorse)；技術語境中 support = 支援 (如「瀏覽器支援此功能」)。政治/日常語境的「支持」為正確 tw 用法",
+      "context": "@domain IT。「支持」偏指「贊成/背書」(endorse)；技術語境中 support = 支援 (如「瀏覽器支援此功能」)。政治/日常語境的「支持」為正確 tw 用法",
       "english": "support",
       "context_clues": ["軟體", "軟件", "瀏覽器", "裝置", "設備", "協定", "協議", "格式", "驅動", "硬體", "硬件", "函式", "函數", "API"]
     },
@@ -4257,8 +4230,9 @@
       "from": "文件系統",
       "to": ["檔案系統"],
       "type": "cross_strait",
-      "context": "@domain 作業系統。限作業系統語境",
-      "english": "filesystem/file system"
+      "context": "@domain 作業系統",
+      "english": "filesystem/file system",
+      "context_clues": ["磁碟", "掛載", "分割區", "inode", "目錄"]
     },
     {
       "from": "文字處理",
@@ -4453,12 +4427,6 @@
       "context": "AI transition filler phrase; delete or rephrase"
     },
     {
-      "from": "更重要的是，",
-      "to": [""],
-      "type": "ai_filler",
-      "context": "AI transition filler phrase; delete or rephrase"
-    },
-    {
       "from": "最底層派生類",
       "to": ["最末層衍生類別"],
       "type": "cross_strait",
@@ -4519,8 +4487,9 @@
       "from": "本地代碼",
       "to": ["原生碼"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "native code"
+      "context": "@domain 程式設計",
+      "english": "native code",
+      "context_clues": ["編譯", "JIT", "執行", "機器碼", "原生", "程式碼"]
     },
     {
       "from": "本地化",
@@ -5381,14 +5350,16 @@
       "to": ["實體記憶體"],
       "type": "cross_strait",
       "context": "@domain 程式設計。限 IT 語境",
-      "english": "physical memory"
+      "english": "physical memory",
+      "context_clues": ["記憶體", "RAM", "位址", "分頁", "虛擬"]
     },
     {
       "from": "物理地址",
       "to": ["實體位址"],
       "type": "cross_strait",
       "context": "@domain 程式設計。限 IT 語境",
-      "english": "physical address"
+      "english": "physical address",
+      "context_clues": ["記憶體", "位址", "分頁", "MMU", "虛擬", "MAC"]
     },
     {
       "from": "物理層",
@@ -5488,15 +5459,17 @@
       "from": "生存空間操作符",
       "to": ["生存空間運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "scope operator"
+      "context": "@domain 程式設計",
+      "english": "scope operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "生存空間解析操作符",
       "to": ["生存空間決議運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "scope resolution operator"
+      "context": "@domain 程式設計",
+      "english": "scope resolution operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "用戶",
@@ -5552,7 +5525,7 @@
       "from": "異常",
       "to": ["例外", "異常情況"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
+      "context": "@domain 程式設計",
       "english": "exception",
       "context_clues": ["拋出", "捕獲", "處理", "程式碼", "代碼", "函式", "函數", "方法", "類別", "除錯", "偵錯"],
       "negative_context_clues": ["偵測", "檢測", "異常值", "統計", "分佈"],
@@ -5562,7 +5535,7 @@
       "from": "異常聲明",
       "to": ["異常宣告"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
+      "context": "@domain 程式設計",
       "english": "exception declaration",
       "context_clues": ["C++", "Java", "函式", "函數", "編譯", "throw"]
     },
@@ -5570,7 +5543,7 @@
       "from": "異常規範",
       "to": ["異常規格"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
+      "context": "@domain 程式設計",
       "english": "exception specification",
       "context_clues": ["C++", "Java", "函式", "函數", "編譯", "throw"]
     },
@@ -5955,7 +5928,7 @@
       "from": "程序",
       "to": ["程式"],
       "type": "cross_strait",
-      "context": "@domain IT。限 IT 語境。不應與「程序」(procedure/步驟) 混淆",
+      "context": "@domain IT。不應與「程序」(procedure/步驟) 混淆",
       "english": "program",
       "context_clues": ["編寫", "代碼", "程式碼", "執行", "開發", "編譯", "軟件", "軟體", "調試", "除錯", "偵錯", "CPU", "排程", "行程", "核心", "記憶體", "I/O", "作業系統", "狀態", "IPC", "Process"],
       "exceptions": ["標準程序", "行政程序", "法律程序", "司法程序", "議事程序", "審核程序", "審查程序"]
@@ -6141,7 +6114,7 @@
       "from": "窗體",
       "to": ["表單"],
       "type": "cross_strait",
-      "context": "@domain UI。限 UI 語境",
+      "context": "@domain UI",
       "english": "form",
       "context_clues": ["UI", "介面", "接口", "控件", "按鈕", "HTML"]
     },
@@ -6192,8 +6165,9 @@
       "from": "等號操作符",
       "to": ["equality 運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "equality operator"
+      "context": "@domain 程式設計",
+      "english": "equality operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "等離子",
@@ -6222,8 +6196,9 @@
       "from": "箭頭操作符",
       "to": ["arrow 運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "arrow operator"
+      "context": "@domain 程式設計",
+      "english": "arrow operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "範式",
@@ -6334,8 +6309,9 @@
       "from": "綁定",
       "to": ["繫結"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境。data binding = 資料繫結；event binding = 事件繫結。依語境自行斟酌",
-      "english": "bind"
+      "context": "@domain 程式設計。data binding = 資料繫結；event binding = 事件繫結。依語境自行斟酌",
+      "english": "bind",
+      "context_clues": ["事件", "資料", "函式", "回呼", "介面"]
     },
     {
       "from": "綑綁",
@@ -6485,12 +6461,6 @@
       "context": "AI summary filler (cn calque 总的来说); tw prefers 總之"
     },
     {
-      "from": "總的來說，",
-      "to": ["總之，"],
-      "type": "ai_filler",
-      "context": "AI summary filler (cn calque 总的来说); tw prefers 總之"
-    },
-    {
       "from": "總線",
       "to": ["匯流排"],
       "type": "cross_strait",
@@ -6498,7 +6468,7 @@
       "english": "bus"
     },
     {
-      "from": "總而言之，",
+      "from": "總而言之",
       "to": [""],
       "type": "ai_filler",
       "context": "AI summary filler; often redundant — delete or keep only if genuinely concluding",
@@ -6561,8 +6531,9 @@
       "from": "翻譯器",
       "to": ["轉譯器"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "translator"
+      "context": "@domain 程式設計",
+      "english": "translator",
+      "context_clues": ["編譯", "原始碼", "程式碼", "直譯器", "代碼"]
     },
     {
       "from": "老撾",
@@ -6631,7 +6602,7 @@
       "from": "聲明",
       "to": ["宣告"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境 (variable/type declaration)。日常語境「發表聲明」(public statement) 為正確 tw 用法",
+      "context": "@domain 程式設計。variable/type declaration 語境；日常語境「發表聲明」(public statement) 為正確 tw 用法",
       "english": "declaration",
       "context_clues": ["變數", "變量", "函式", "函數", "型別", "類別", "類型", "屬性", "方法", "介面", "接口", "模組"]
     },
@@ -6945,8 +6916,9 @@
       "from": "被重載的操作符",
       "to": ["多載化運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "overloaded operator"
+      "context": "@domain 程式設計",
+      "english": "overloaded operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "裏",
@@ -7058,8 +7030,9 @@
       "from": "解釋器",
       "to": ["直譯器", "解譯器"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "interpreter"
+      "context": "@domain 程式設計",
+      "english": "interpreter",
+      "context_clues": ["腳本", "Python", "執行", "程式碼", "直譯", "代碼"]
     },
     {
       "from": "觸摸",
@@ -7086,8 +7059,9 @@
       "from": "計算機",
       "to": ["電腦"],
       "type": "cross_strait",
-      "context": "@domain IT。限非專業語境。針對專業場景，諸如電腦科學的科目名稱，仍允許使用「計算機」，如「計算機結構」(computer architecture)",
-      "english": "computer"
+      "context": "@domain IT。一般語境「計算機」→「電腦」；科目名稱如「計算機結構」(computer architecture) 保留原詞",
+      "english": "computer",
+      "exceptions": ["計算機科學", "計算機結構", "計算機概論", "計算機組織", "量子計算機", "計算機視覺", "計算機圖學", "計算機工程", "計算機網路"]
     },
     {
       "from": "計算機安全",
@@ -7211,7 +7185,8 @@
       "to": ["登錄檔"],
       "type": "cross_strait",
       "context": "@domain IT。限 Windows 語境",
-      "english": "registry"
+      "english": "registry",
+      "context_clues": ["Windows", "微軟", "系統", "登錄", "regedit"]
     },
     {
       "from": "註銷",
@@ -7231,7 +7206,7 @@
       "from": "語句",
       "to": ["敘述", "陳述式", "述句"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境。語言學的「語句」為正確 tw 用法",
+      "context": "@domain 程式設計。語言學的「語句」為正確 tw 用法",
       "english": "statement",
       "context_clues": ["代碼", "程式碼", "編譯", "執行", "迴圈", "循環", "條件"]
     },
@@ -7274,8 +7249,9 @@
       "from": "調用操作符",
       "to": ["call 運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "call operator"
+      "context": "@domain 程式設計",
+      "english": "call operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "調用棧",
@@ -7361,7 +7337,8 @@
       "to": ["授權條款"],
       "type": "cross_strait",
       "context": "@domain 軟體授權。限 IT 語境。軟體授權 (software license) 應譯「授權條款」，法律語境可用「許可證」",
-      "english": "license"
+      "english": "license",
+      "context_clues": ["軟體", "開源", "授權", "GPL", "MIT"]
     },
     {
       "from": "貝寧",
@@ -7405,7 +7382,8 @@
       "to": ["檔案總管"],
       "type": "cross_strait",
       "context": "@domain IT。限 Windows 語境",
-      "english": "file explorer"
+      "english": "file explorer",
+      "context_clues": ["Windows", "微軟", "系統", "檔案", "資料夾"]
     },
     {
       "from": "賦值",
@@ -7418,8 +7396,9 @@
       "from": "賦值操作符",
       "to": ["指派運算子"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "assignment operator"
+      "context": "@domain 程式設計",
+      "english": "assignment operator",
+      "context_clues": ["運算", "表達式", "運算子", "C++", "編譯", "程式", "語法"]
     },
     {
       "from": "質量",
@@ -7545,7 +7524,7 @@
       "from": "返回",
       "to": ["傳回", "回返", "回傳"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境。一般用法「返回」(go back) 為正確 tw 用法",
+      "context": "@domain 程式設計。一般用法「返回」(go back) 為正確 tw 用法",
       "english": "return",
       "context_clues": ["函式", "函數", "程式碼", "代碼", "變數", "變量", "回傳"]
     },
@@ -7853,8 +7832,9 @@
       "from": "重載",
       "to": ["多載化"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境",
-      "english": "overload"
+      "context": "@domain 程式設計",
+      "english": "overload",
+      "context_clues": ["函式", "函數", "運算子", "多載", "C++", "方法"]
     },
     {
       "from": "重載的函數",
@@ -8199,18 +8179,6 @@
       "context": "AI filler phrase with zero information content; delete"
     },
     {
-      "from": "需要注意的是，",
-      "to": [""],
-      "type": "ai_filler",
-      "context": "AI filler phrase with zero information content; delete"
-    },
-    {
-      "from": "需要注意的是：",
-      "to": [""],
-      "type": "ai_filler",
-      "context": "AI filler phrase with zero information content; delete"
-    },
-    {
       "from": "靈活性",
       "to": ["彈性"],
       "type": "cross_strait",
@@ -8278,7 +8246,8 @@
       "to": ["頁首"],
       "type": "cross_strait",
       "context": "@domain 文書。限出版語境",
-      "english": "header (page)"
+      "english": "header (page)",
+      "context_clues": ["頁碼", "排版", "印刷", "頁尾", "版面", "Word"]
     },
     {
       "from": "頁腳",
@@ -8322,7 +8291,8 @@
       "to": ["預先配置"],
       "type": "cross_strait",
       "context": "@domain 系統程式。限記憶體/資源配置語境",
-      "english": "pre-allocate"
+      "english": "pre-allocate",
+      "context_clues": ["記憶體", "緩衝區", "malloc", "配置", "容量"]
     },
     {
       "from": "預處理器",
@@ -8335,7 +8305,7 @@
       "from": "頭",
       "to": ["標頭"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境 (C/C++ header file)。「開頭」「剃頭」「橋頭」等日常語境不在此範圍",
+      "context": "@domain 程式設計。C/C++ header file 語境；「開頭」「剃頭」「橋頭」等日常語境不在此範圍",
       "english": "header (programming)",
       "context_clues": ["標頭", "宣告", "定義", "編譯", "函式", "函數", "程式碼", "代碼", "原始碼"],
       "exceptions": ["開頭", "裡頭", "回頭", "前頭", "後頭", "起頭", "盡頭", "剃頭", "橋頭", "碼頭", "源頭", "骨頭", "標頭"]
@@ -8373,7 +8343,7 @@
       "from": "類",
       "to": ["類別"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。依 MoE 辭典，「類」為分類/種類之意。程式設計中 class 應譯「類別」，限程式設計語境",
+      "context": "@domain 程式設計。依 MoE 辭典，「類」為分類/種類之意。程式設計中 class 應譯「類別」",
       "english": "class",
       "context_clues": ["class", "物件", "對象", "繼承", "多型", "介面", "OOP", "建構", "方法", "抽象", "封裝", "實體", "子類別", "基底", "衍生", "overrid", "虛擬函式"],
       "exceptions": ["分類", "人類", "種類", "類似", "歸類", "各類", "同類", "大類", "小類", "這類", "那類", "此類", "何類", "一類", "之類", "其類", "同類之", "以及類似", "類比", "類推", "類別"]
@@ -8382,7 +8352,7 @@
       "from": "類型",
       "to": ["型態", "型別"],
       "type": "cross_strait",
-      "context": "@domain 程式設計。限程式設計語境。「類型」在日常語境表示「種類/範疇」為正確 tw 用法",
+      "context": "@domain 程式設計。「類型」在日常語境表示「種類/範疇」為正確 tw 用法",
       "english": "type",
       "context_clues": ["型別", "型態", "變數", "變量", "函式", "函數", "程式碼", "代碼", "泛型", "編譯", "宣告"],
       "negative_context_clues": ["哪些類型", "什麼類型", "各種類型", "某種類型", "這類型"]
@@ -8497,7 +8467,7 @@
       "from": "首席信息官",
       "to": ["資訊長"],
       "type": "cross_strait",
-      "context": "@domain 金融",
+      "context": "@domain 商業",
       "english": "Chief Information Officer (CIO)"
     },
     {
@@ -8518,7 +8488,7 @@
       "from": "首席運營官",
       "to": ["營運長"],
       "type": "cross_strait",
-      "context": "@domain 金融",
+      "context": "@domain 商業",
       "english": "Chief Operating Officer (COO)"
     },
     {
@@ -8570,7 +8540,8 @@
       "to": ["磁碟機"],
       "type": "cross_strait",
       "context": "限 IT 語境，針對 DOS/Windows 的檔案系統 (@seealso 資源管理器)",
-      "english": "drive"
+      "english": "drive",
+      "context_clues": ["磁碟", "硬碟", "檔案", "Windows", "路徑"]
     },
     {
       "from": "驅動程序",

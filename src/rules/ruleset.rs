@@ -394,6 +394,12 @@ pub struct SpellingRule {
 }
 
 impl SpellingRule {
+    /// True when this rule is an AiFiller deletion (`to: [""]`): the matched
+    /// phrase should be removed entirely, with the empty string as the fix.
+    pub fn is_deletion_rule(&self) -> bool {
+        self.rule_type == RuleType::AiFiller && self.to.len() == 1 && self.to[0].is_empty()
+    }
+
     /// Create a spelling rule with required fields; optional fields default to None.
     #[cfg(test)]
     pub fn new(from: impl Into<String>, to: Vec<String>, rule_type: RuleType) -> Self {
@@ -572,6 +578,8 @@ impl Issue {
     pub fn compact_suggestion(&self) -> String {
         if self.suggestions.is_empty() {
             self.english.as_deref().unwrap_or("?").to_string()
+        } else if self.suggestions.len() == 1 && self.suggestions[0].is_empty() {
+            "(delete)".to_string()
         } else if self.suggestions.len() == 1 {
             self.suggestions[0].clone()
         } else {
