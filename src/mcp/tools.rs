@@ -45,6 +45,8 @@ pub struct Server {
     client_capabilities: ClientCapabilities,
     /// Whether the client has completed the initialize handshake.
     initialized: bool,
+    /// Whether the client has sent a shutdown request.
+    shutdown_requested: bool,
     /// Client name from initialize handshake, used for auto-compact detection.
     client_name: Option<String>,
 }
@@ -71,6 +73,7 @@ impl Server {
             ruleset_hash,
             client_capabilities: ClientCapabilities::default(),
             initialized: false,
+            shutdown_requested: false,
             client_name: None,
         })
     }
@@ -110,6 +113,29 @@ impl Server {
         &mut self,
         req: &mut JsonRpcRequest,
     ) -> Option<Option<JsonRpcResponse>> {
+        // exit is always honored regardless of lifecycle state.
+        if req.method == "exit" {
+            log::info!("exit notification, terminating");
+            // MCP spec: unconditional process exit.
+            // Exit code 0 if shutdown was requested first, 1 otherwise.
+            let code = if self.shutdown_requested { 0 } else { 1 };
+            std::process::exit(code);
+        }
+
+        // After shutdown, reject everything except exit (handled above).
+        if self.shutdown_requested {
+            log::warn!("rejecting {} after shutdown", req.method);
+            return Some(if req.id.is_some() {
+                Some(JsonRpcResponse::error(
+                    req.id.clone(),
+                    INVALID_REQUEST,
+                    "server is shutting down".into(),
+                ))
+            } else {
+                None
+            });
+        }
+
         match req.method.as_str() {
             "initialize" => {
                 if req.id.is_none() {
@@ -129,6 +155,19 @@ impl Server {
             "initialized" | "notifications/initialized" | "notifications/cancelled" => {
                 log::info!("{}", req.method);
                 Some(None)
+            }
+            "shutdown" => {
+                log::info!("shutdown requested");
+                self.shutdown_requested = true;
+                if req.id.is_some() {
+                    Some(Some(JsonRpcResponse::success(
+                        req.id.clone(),
+                        serde_json::json!({}),
+                    )))
+                } else {
+                    // shutdown as notification: set flag, no response
+                    Some(None)
+                }
             }
             "ping" => {
                 if req.id.is_some() {

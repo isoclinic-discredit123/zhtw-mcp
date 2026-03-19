@@ -1242,3 +1242,198 @@ fn e2e_explain_mode_and_determinism() {
     let status = child.wait().unwrap();
     assert!(status.success());
 }
+
+#[test]
+fn e2e_shutdown_returns_empty_and_clean_exit() {
+    let bin = binary_path();
+    if !bin.exists() {
+        panic!("binary not found at {:?}; run `cargo build` first", bin);
+    }
+
+    let tmp_dir = tempfile::tempdir().expect("create temp dir");
+    let overrides_path = tmp_dir.path().join("overrides.json");
+    let suppressions_path = tmp_dir.path().join("suppressions.json");
+
+    let mut child = Command::new(&bin)
+        .args([
+            "--overrides",
+            overrides_path.to_str().unwrap(),
+            "--suppressions",
+            suppressions_path.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn zhtw-mcp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    // Initialize
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+    assert_eq!(resp["id"], 1);
+    assert!(resp["result"].is_object());
+
+    // Shutdown: must respond with empty result {}
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "shutdown",
+            "id": 2
+        }),
+    );
+    assert_eq!(resp["id"], 2);
+    assert_eq!(resp["result"], json!({}));
+    assert!(resp.get("error").is_none());
+
+    // After shutdown, the server exits the serve loop cleanly.
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn e2e_exit_terminates_process() {
+    let bin = binary_path();
+    if !bin.exists() {
+        panic!("binary not found at {:?}; run `cargo build` first", bin);
+    }
+
+    let tmp_dir = tempfile::tempdir().expect("create temp dir");
+    let overrides_path = tmp_dir.path().join("overrides.json");
+    let suppressions_path = tmp_dir.path().join("suppressions.json");
+
+    let mut child = Command::new(&bin)
+        .args([
+            "--overrides",
+            overrides_path.to_str().unwrap(),
+            "--suppressions",
+            suppressions_path.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn zhtw-mcp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    // Initialize
+    send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+
+    // Shutdown first (proper lifecycle)
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "shutdown",
+            "id": 2
+        }),
+    );
+    assert_eq!(resp["result"], json!({}));
+
+    // Exit notification — process should terminate with code 0
+    send_notification(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "exit"
+        }),
+    );
+
+    let status = child.wait().unwrap();
+    assert!(
+        status.success(),
+        "exit after shutdown should exit with code 0"
+    );
+}
+
+#[test]
+fn e2e_exit_without_shutdown_exits_nonzero() {
+    let bin = binary_path();
+    if !bin.exists() {
+        panic!("binary not found at {:?}; run `cargo build` first", bin);
+    }
+
+    let tmp_dir = tempfile::tempdir().expect("create temp dir");
+    let overrides_path = tmp_dir.path().join("overrides.json");
+    let suppressions_path = tmp_dir.path().join("suppressions.json");
+
+    let mut child = Command::new(&bin)
+        .args([
+            "--overrides",
+            overrides_path.to_str().unwrap(),
+            "--suppressions",
+            suppressions_path.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn zhtw-mcp");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    // Initialize
+    send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.1" }
+            }
+        }),
+    );
+
+    // Exit without shutdown — process should terminate with code 1
+    send_notification(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "exit"
+        }),
+    );
+
+    let status = child.wait().unwrap();
+    assert!(
+        !status.success(),
+        "exit without prior shutdown should exit with non-zero code"
+    );
+}
