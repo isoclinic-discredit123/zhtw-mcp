@@ -29,7 +29,7 @@ use crate::fixer::{
 use crate::rules::loader::compute_ruleset_hash;
 use crate::rules::ruleset::Ruleset;
 use crate::rules::ruleset::{Issue, IssueType, PoliticalStance, Profile, Severity};
-use crate::rules::store::{OverrideStore, PackStore, SuppressionStore};
+use crate::rules::store::{OverrideStore, PackStore, SuppressionStore, TranslationMemoryStore};
 
 /// The MCP tool server. Holds the compiled scanner, override/pack stores,
 /// ruleset metadata, and client capability information.
@@ -38,6 +38,8 @@ pub struct Server {
     /// SC→TC converter for auto-converting Simplified Chinese input.
     s2t: S2TConverter,
     suppression_store: SuppressionStore,
+    /// Translation memory: persistent correction tracking.
+    tm_store: Option<TranslationMemoryStore>,
     ruleset_hash: String,
     /// Parsed client capabilities from the initialize handshake.
     client_capabilities: ClientCapabilities,
@@ -54,6 +56,7 @@ impl Server {
         suppression_store: SuppressionStore,
         pack_store: PackStore,
         active_packs: Vec<String>,
+        tm_store: Option<TranslationMemoryStore>,
     ) -> anyhow::Result<Self> {
         let base_ruleset = crate::rules::loader::load_embedded_ruleset()?;
 
@@ -64,6 +67,7 @@ impl Server {
             scanner,
             s2t: S2TConverter::new(),
             suppression_store,
+            tm_store,
             ruleset_hash,
             client_capabilities: ClientCapabilities::default(),
             initialized: false,
@@ -364,6 +368,7 @@ impl Server {
                     refine_issues_with_sampling(&mut issues, b, text, 0.3, 0.8);
                 }
                 self.apply_suppressions(&mut issues);
+                let tm_suppressed = self.apply_tm(&mut issues);
                 apply_ignore_set(&mut issues, &ignore_set);
 
                 let trace =
@@ -389,6 +394,7 @@ impl Server {
                     #[cfg(feature = "translate")]
                     calibrate_result,
                     ai_signature: ai_signature.as_ref(),
+                    tm_suppressed,
                 })
             }
 
@@ -424,6 +430,9 @@ impl Server {
                 }
 
                 self.apply_suppressions(&mut issues);
+                // TM is NOT applied here: the fixer filter (should_suppress)
+                // prevents fixing TM-rejected terms, and the post-fix apply_tm
+                // handles severity downgrade + counting on the final residual.
                 apply_ignore_set(&mut issues, &ignore_set);
 
                 // Snapshot AFTER suppressions so restored severity reflects final state.
@@ -452,10 +461,22 @@ impl Server {
                     })
                     .collect();
 
+                // Filter out TM-suppressed issues before fixing: a term the
+                // user deliberately rejected must not be auto-corrected.
+                let fix_issues: Vec<Issue> = if self.tm_store.is_some() {
+                    issues
+                        .iter()
+                        .filter(|i| !self.tm_store.as_ref().unwrap().should_suppress(&i.found))
+                        .cloned()
+                        .collect()
+                } else {
+                    issues.clone()
+                };
+
                 let excluded_pairs = to_offset_pairs(&excluded);
                 let fix_result = apply_fixes_with_context(
                     text,
-                    &issues,
+                    &fix_issues,
                     mode,
                     &excluded_pairs,
                     Some(self.scanner.segmenter()),
@@ -508,6 +529,10 @@ impl Server {
                 // whose offset falls within a byte range written by the fixer.
                 suppress_convergent_issues(&mut remaining_issues, &fix_result.applied_fixes);
 
+                // Apply TM after preserved state restoration so the count
+                // reflects the true final state, not a pre-fix snapshot.
+                let tm_suppressed = self.apply_tm(&mut remaining_issues);
+
                 let trace = Trace::new("zhtw", &self.ruleset_hash, text)
                     .with_issue_count(remaining_issues.len())
                     .with_output(&fix_result.text);
@@ -532,6 +557,7 @@ impl Server {
                     #[cfg(feature = "translate")]
                     calibrate_result,
                     ai_signature: ai_signature.as_ref(),
+                    tm_suppressed,
                 })
             }
         }
@@ -544,6 +570,32 @@ impl Server {
                 issue.severity = Severity::Info;
             }
         }
+    }
+
+    /// Apply translation memory: suppress lexical/contextual issues that the
+    /// user previously rejected (kept the flagged term). Orthographic issue
+    /// types (Punctuation, Case, Variant, Grammar, AiStyle) are immune.
+    /// Returns the number of issues suppressed.
+    fn apply_tm(&self, issues: &mut [Issue]) -> usize {
+        let Some(tm) = &self.tm_store else {
+            return 0;
+        };
+        let mut count = 0;
+        for issue in issues {
+            match issue.rule_type {
+                IssueType::Punctuation
+                | IssueType::Case
+                | IssueType::Variant
+                | IssueType::Grammar
+                | IssueType::AiStyle => continue,
+                _ => {}
+            }
+            if tm.should_suppress(&issue.found) && issue.severity != Severity::Info {
+                issue.severity = Severity::Info;
+                count += 1;
+            }
+        }
+        count
     }
 
     // -- Resource and prompt handlers -----------------------------------------
@@ -972,6 +1024,14 @@ struct IssueSummary {
     errors: usize,
     warnings: usize,
     info: usize,
+    /// Number of issues downgraded to Info by translation memory.
+    /// Omitted (0) when TM is inactive or had no effect.
+    #[serde(skip_serializing_if = "is_zero")]
+    tm_suppressed: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Gate status in the tool response.
@@ -1100,11 +1160,12 @@ struct SummaryOutput<'a> {
 }
 
 /// Count issues by severity.
-fn build_summary(issues: &[Issue]) -> IssueSummary {
+fn build_summary(issues: &[Issue], tm_suppressed: usize) -> IssueSummary {
     let mut s = IssueSummary {
         errors: 0,
         warnings: 0,
         info: 0,
+        tm_suppressed,
     };
     for issue in issues {
         match issue.severity {
@@ -1141,6 +1202,8 @@ struct CheckOutputParams<'a> {
     #[cfg(feature = "translate")]
     calibrate_result: Option<crate::engine::translate::CalibrateResult>,
     ai_signature: Option<&'a crate::engine::ai_score::AiSignatureReport>,
+    /// Number of issues downgraded by translation memory.
+    tm_suppressed: usize,
 }
 
 /// Build the unified zhtw JSON response and wrap it in a CallToolResult.
@@ -1153,7 +1216,7 @@ struct CheckOutputParams<'a> {
 /// allocations. Uses compact JSON by default; set `ZHTW_PRETTY=1` env var
 /// for indented output during debugging.
 fn build_check_output(params: &CheckOutputParams<'_>) -> CallToolResult {
-    let summary = build_summary(params.issues);
+    let summary = build_summary(params.issues, params.tm_suppressed);
 
     let max_err = params.max_errors.unwrap_or(0) as usize;
     let max_warn = params.max_warnings.unwrap_or(0) as usize;

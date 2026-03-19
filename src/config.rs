@@ -24,6 +24,7 @@ pub struct ProjectConfig {
     pub overrides: Option<String>,
     pub suppressions: Option<String>,
     pub packs: Option<Vec<String>>,
+    pub translation_memory: Option<String>,
 }
 
 impl ProjectConfig {

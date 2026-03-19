@@ -207,7 +207,7 @@ fn bench_apply_fixes(c: &mut Criterion) {
             let result = apply_fixes_with_context(
                 black_box(&text),
                 black_box(&issues),
-                FixMode::Safe,
+                FixMode::LexicalSafe,
                 &[],
                 Some(&segmenter),
             );

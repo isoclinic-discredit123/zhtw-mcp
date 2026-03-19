@@ -476,6 +476,299 @@ pub fn default_suppressions_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("suppressions.json"))
 }
 
+// TranslationMemoryStore: persistent correction tracking
+
+/// Schema version for .zhtw-tm.json. Independent of SCHEMA_VERSION since
+/// the TM file evolves on its own timeline.
+pub const TM_SCHEMA_VERSION: u32 = 1;
+
+/// Maximum number of TM entries. Human-authored decisions; 10 000 is
+/// generous for any realistic project. Prevents unbounded memory growth
+/// from accidental or adversarial import.
+const TM_MAX_ENTRIES: usize = 10_000;
+
+/// A single correction record in the translation memory.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TmEntry {
+    pub found: String,
+    pub scanner_suggested: String,
+    pub user_chose: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    pub timestamp: String,
+}
+
+/// On-disk format for `.zhtw-tm.json`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TranslationMemory {
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub entries: Vec<TmEntry>,
+}
+
+impl Default for TranslationMemory {
+    fn default() -> Self {
+        Self {
+            schema_version: TM_SCHEMA_VERSION,
+            entries: Vec::new(),
+        }
+    }
+}
+
+/// JSON-file-backed translation memory store.
+///
+/// Records user decisions about scanner suggestions for future scans.
+/// When a user rejects a scanner suggestion (keeps the flagged term),
+/// future scans suppress that rule for matching context. When the user
+/// accepts, confidence is boosted.
+pub struct TranslationMemoryStore {
+    path: PathBuf,
+    memory: TranslationMemory,
+    /// Lookup index: `found` term -> indices into `memory.entries`.
+    index: HashMap<String, Vec<usize>>,
+}
+
+impl TranslationMemoryStore {
+    /// Open (or create) a TM store at the given path.
+    pub fn open(path: &Path) -> Result<Self> {
+        let memory = if path.exists() {
+            let content = std::fs::read_to_string(path)
+                .with_context(|| format!("read {}", path.display()))?;
+            match serde_json::from_str::<TranslationMemory>(&content) {
+                Ok(tm) if tm.schema_version == TM_SCHEMA_VERSION => tm,
+                Ok(tm) => {
+                    log::warn!(
+                        "TM schema version mismatch (stored={}, expected={}); \
+                         backing up and resetting",
+                        tm.schema_version,
+                        TM_SCHEMA_VERSION,
+                    );
+                    backup_file(path, &format!("v{}.bak", tm.schema_version));
+                    TranslationMemory::default()
+                }
+                Err(e) => {
+                    log::warn!("corrupt TM JSON ({e}); backing up and resetting");
+                    backup_file(path, "corrupt.bak");
+                    TranslationMemory::default()
+                }
+            }
+        } else {
+            TranslationMemory::default()
+        };
+        let index = build_tm_index(&memory.entries);
+        Ok(Self {
+            path: path.to_owned(),
+            memory,
+            index,
+        })
+    }
+
+    fn flush(&self) -> Result<()> {
+        atomic_write_json(&self.path, &self.memory)
+    }
+
+    /// Record a correction decision. Deduplicates by `found`: the most recent
+    /// decision for a term always overwrites the previous one, regardless of
+    /// context. This ensures a user can undo a rejection by accepting later.
+    pub fn record(&mut self, entry: TmEntry) -> Result<()> {
+        let _lock = acquire_lock(&self.path)?;
+
+        // Deduplicate by found only: latest decision wins. Use rposition()
+        // to match should_suppress()'s last()-based read behavior.
+        let existing = self
+            .memory
+            .entries
+            .iter()
+            .rposition(|e| e.found == entry.found);
+
+        // Enforce entry cap (new entries only; updates always allowed).
+        if existing.is_none() && self.memory.entries.len() >= TM_MAX_ENTRIES {
+            anyhow::bail!(
+                "translation memory full ({TM_MAX_ENTRIES} entries); \
+                 clear or export before recording more"
+            );
+        }
+
+        // Save old entry for rollback before mutating.
+        let old_entry = existing.map(|pos| self.memory.entries[pos].clone());
+
+        if let Some(pos) = existing {
+            self.memory.entries[pos] = entry;
+        } else {
+            let new_idx = self.memory.entries.len();
+            let found_key = entry.found.clone();
+            self.memory.entries.push(entry);
+            self.index.entry(found_key).or_default().push(new_idx);
+        }
+
+        if let Err(e) = self.flush() {
+            // Rollback: restore previous state.
+            if let Some(old) = old_entry {
+                self.memory.entries[existing.unwrap()] = old;
+            } else {
+                self.memory.entries.pop();
+            }
+            self.index = build_tm_index(&self.memory.entries);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Check if the user previously rejected the scanner suggestion for this
+    /// term (i.e. user_chose == found on the latest TM entry for that term).
+    ///
+    /// Matches by `found` only. Uses the last index entry (latest decision)
+    /// to avoid stale duplicates in hand-edited files poisoning the result.
+    pub fn should_suppress(&self, found: &str) -> bool {
+        let Some(indices) = self.index.get(found) else {
+            return false;
+        };
+        // Last entry is the latest decision (record() appends or updates in place).
+        indices.last().is_some_and(|&idx| {
+            let e = &self.memory.entries[idx];
+            e.user_chose == e.found
+        })
+    }
+
+    /// List all TM entries.
+    pub fn list(&self) -> &[TmEntry] {
+        &self.memory.entries
+    }
+
+    /// Clear all TM entries.
+    pub fn clear(&mut self) -> Result<()> {
+        let _lock = acquire_lock(&self.path)?;
+        let old_memory = std::mem::take(&mut self.memory);
+        let old_index = std::mem::take(&mut self.index);
+        self.memory = TranslationMemory::default();
+        if let Err(e) = self.flush() {
+            self.memory = old_memory;
+            self.index = old_index;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Export TM entries to a file.
+    pub fn export(&self, dest: &Path) -> Result<()> {
+        atomic_write_json(dest, &self.memory)
+    }
+
+    /// Import TM entries from a file. Merges with existing entries (dedup
+    /// by `found` only — latest decision per term wins). Returns `(added, updated)`.
+    pub fn import(&mut self, src: &Path) -> Result<(usize, usize)> {
+        let _lock = acquire_lock(&self.path)?;
+        let content =
+            std::fs::read_to_string(src).with_context(|| format!("read {}", src.display()))?;
+        let imported: TranslationMemory =
+            serde_json::from_str(&content).context("invalid TM JSON")?;
+
+        // Snapshot for rollback.
+        let old_entries = self.memory.entries.clone();
+        let old_index = self.index.clone();
+
+        let mut added = 0;
+        let mut updated = 0;
+        for entry in imported.entries {
+            if let Some(pos) = self
+                .memory
+                .entries
+                .iter()
+                .rposition(|e| e.found == entry.found)
+            {
+                // Latest-wins: update existing entry.
+                self.memory.entries[pos] = entry;
+                updated += 1;
+            } else {
+                if self.memory.entries.len() >= TM_MAX_ENTRIES {
+                    log::warn!(
+                        "TM entry cap ({TM_MAX_ENTRIES}) reached during import; \
+                         skipping remaining entries"
+                    );
+                    break;
+                }
+                self.memory.entries.push(entry);
+                added += 1;
+            }
+        }
+
+        if added > 0 || updated > 0 {
+            self.index = build_tm_index(&self.memory.entries);
+            if let Err(e) = self.flush() {
+                self.memory.entries = old_entries;
+                self.index = old_index;
+                return Err(e);
+            }
+        }
+        Ok((added, updated))
+    }
+
+    /// Re-read TM from disk.
+    pub fn reload(&mut self) -> Result<()> {
+        let refreshed = Self::open(&self.path)?;
+        self.memory = refreshed.memory;
+        self.index = refreshed.index;
+        Ok(())
+    }
+
+    /// The path to the TM file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Build lookup index from TM entries.
+fn build_tm_index(entries: &[TmEntry]) -> HashMap<String, Vec<usize>> {
+    let mut index: HashMap<String, Vec<usize>> = HashMap::with_capacity(entries.len());
+    for (idx, entry) in entries.iter().enumerate() {
+        index.entry(entry.found.clone()).or_default().push(idx);
+    }
+    index
+}
+
+/// Discover `.zhtw-tm.json` by walking from start_dir upward to .git root.
+/// Returns the path where the TM file should live (may not exist yet).
+pub fn discover_tm_path(start_dir: &Path) -> PathBuf {
+    let mut dir = start_dir.to_path_buf();
+    loop {
+        let candidate = dir.join(".zhtw-tm.json");
+        if candidate.is_file() {
+            return candidate;
+        }
+        // At .git root: use this directory for TM even if file does not exist yet.
+        if dir.join(".git").exists() {
+            return dir.join(".zhtw-tm.json");
+        }
+        if !dir.pop() {
+            // No VCS root found; use cwd.
+            return start_dir.join(".zhtw-tm.json");
+        }
+    }
+}
+
+/// Return today's date as an ISO 8601 string (YYYY-MM-DD, UTC).
+/// No external dependency; civil calendar arithmetic from Unix epoch.
+pub fn iso_date_today() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = secs / 86400;
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 // PackStore: domain-specific rule packs
 
 /// Resolve the default packs directory.
@@ -1117,5 +1410,265 @@ mod tests {
         assert!(PackStore::validate_pack_name("medical").is_ok());
         assert!(PackStore::validate_pack_name("it-terms").is_ok());
         assert!(PackStore::validate_pack_name("my_pack.v2").is_ok());
+    }
+
+    // TranslationMemoryStore tests
+
+    #[test]
+    fn tm_record_and_suppress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".zhtw-tm.json");
+        let mut store = TranslationMemoryStore::open(&path).unwrap();
+
+        assert!(store.list().is_empty());
+
+        // Record a rejection (user kept the flagged term).
+        store
+            .record(TmEntry {
+                found: "線程".into(),
+                scanner_suggested: "執行緒".into(),
+                user_chose: "線程".into(),
+                context: Some("作業系統".into()),
+                timestamp: "2026-03-18".into(),
+            })
+            .unwrap();
+
+        assert_eq!(store.list().len(), 1);
+        // Rejection suppresses the term regardless of context.
+        assert!(store.should_suppress("線程"));
+        // Different term is not suppressed.
+        assert!(!store.should_suppress("調用"));
+    }
+
+    #[test]
+    fn tm_acceptance_does_not_suppress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".zhtw-tm.json");
+        let mut store = TranslationMemoryStore::open(&path).unwrap();
+
+        // User accepted the scanner suggestion.
+        store
+            .record(TmEntry {
+                found: "調用".into(),
+                scanner_suggested: "呼叫".into(),
+                user_chose: "呼叫".into(),
+                context: None,
+                timestamp: "2026-03-18".into(),
+            })
+            .unwrap();
+
+        // Acceptance does not suppress (user_chose != found).
+        assert!(!store.should_suppress("調用"));
+    }
+
+    #[test]
+    fn tm_deduplicates_by_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".zhtw-tm.json");
+        let mut store = TranslationMemoryStore::open(&path).unwrap();
+
+        // Record a rejection with context.
+        store
+            .record(TmEntry {
+                found: "線程".into(),
+                scanner_suggested: "執行緒".into(),
+                user_chose: "線程".into(),
+                context: Some("OS".into()),
+                timestamp: "2026-03-18".into(),
+            })
+            .unwrap();
+        assert!(store.should_suppress("線程"));
+
+        // Accept with different context: overwrites the rejection (dedup by found).
+        store
+            .record(TmEntry {
+                found: "線程".into(),
+                scanner_suggested: "執行緒".into(),
+                user_chose: "執行緒".into(),
+                context: None,
+                timestamp: "2026-03-19".into(),
+            })
+            .unwrap();
+
+        assert_eq!(store.list().len(), 1);
+        assert_eq!(store.list()[0].user_chose, "執行緒");
+        // Acceptance overwrote rejection: no longer suppresses.
+        assert!(!store.should_suppress("線程"));
+    }
+
+    #[test]
+    fn tm_persists_across_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".zhtw-tm.json");
+
+        {
+            let mut store = TranslationMemoryStore::open(&path).unwrap();
+            store
+                .record(TmEntry {
+                    found: "信息".into(),
+                    scanner_suggested: "資訊".into(),
+                    user_chose: "信息".into(),
+                    context: None,
+                    timestamp: "2026-03-18".into(),
+                })
+                .unwrap();
+        }
+
+        let store = TranslationMemoryStore::open(&path).unwrap();
+        assert_eq!(store.list().len(), 1);
+        assert!(store.should_suppress("信息"));
+    }
+
+    #[test]
+    fn tm_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".zhtw-tm.json");
+        let mut store = TranslationMemoryStore::open(&path).unwrap();
+
+        store
+            .record(TmEntry {
+                found: "test".into(),
+                scanner_suggested: "ok".into(),
+                user_chose: "test".into(),
+                context: None,
+                timestamp: "2026-03-18".into(),
+            })
+            .unwrap();
+        assert_eq!(store.list().len(), 1);
+
+        store.clear().unwrap();
+        assert!(store.list().is_empty());
+        assert!(!store.should_suppress("test"));
+    }
+
+    #[test]
+    fn tm_export_import_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_path = dir.path().join("source.json");
+        let dest_path = dir.path().join("dest.json");
+
+        // Create source TM with entries.
+        {
+            let mut store = TranslationMemoryStore::open(&src_path).unwrap();
+            store
+                .record(TmEntry {
+                    found: "線程".into(),
+                    scanner_suggested: "執行緒".into(),
+                    user_chose: "執行緒".into(),
+                    context: None,
+                    timestamp: "2026-03-18".into(),
+                })
+                .unwrap();
+            store
+                .record(TmEntry {
+                    found: "內存".into(),
+                    scanner_suggested: "記憶體".into(),
+                    user_chose: "內存".into(),
+                    context: Some("casual".into()),
+                    timestamp: "2026-03-18".into(),
+                })
+                .unwrap();
+            store.export(&dest_path).unwrap();
+        }
+
+        // Import into a fresh TM.
+        let import_path = dir.path().join("target.json");
+        let mut target = TranslationMemoryStore::open(&import_path).unwrap();
+        let (added, updated) = target.import(&dest_path).unwrap();
+        assert_eq!(added, 2);
+        assert_eq!(updated, 0);
+        assert_eq!(target.list().len(), 2);
+
+        // Import again: updates existing, adds none.
+        let (added2, updated2) = target.import(&dest_path).unwrap();
+        assert_eq!(added2, 0);
+        assert_eq!(updated2, 2);
+        assert_eq!(target.list().len(), 2);
+    }
+
+    #[test]
+    fn tm_schema_mismatch_resets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".zhtw-tm.json");
+
+        let bad = TranslationMemory {
+            schema_version: 999,
+            entries: vec![TmEntry {
+                found: "test".into(),
+                scanner_suggested: "ok".into(),
+                user_chose: "test".into(),
+                context: None,
+                timestamp: "2026-03-18".into(),
+            }],
+        };
+        std::fs::write(&path, serde_json::to_string(&bad).unwrap()).unwrap();
+
+        let store = TranslationMemoryStore::open(&path).unwrap();
+        assert!(store.list().is_empty());
+
+        let backup = dir.path().join(".zhtw-tm.v999.bak");
+        assert!(backup.exists());
+    }
+
+    #[test]
+    fn tm_discover_path_at_git_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let sub = repo.join("src").join("deep");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let discovered = discover_tm_path(&sub);
+        assert_eq!(discovered, repo.join(".zhtw-tm.json"));
+    }
+
+    #[test]
+    fn tm_hand_edited_duplicates_record_updates_last() {
+        // Simulate a hand-edited TM file with duplicate found entries.
+        // record() should update the last one (rposition), and
+        // should_suppress() should read the last one (last()).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".zhtw-tm.json");
+
+        let duped = TranslationMemory {
+            schema_version: TM_SCHEMA_VERSION,
+            entries: vec![
+                TmEntry {
+                    found: "線程".into(),
+                    scanner_suggested: "執行緒".into(),
+                    user_chose: "線程".into(), // rejection
+                    context: None,
+                    timestamp: "2026-03-01".into(),
+                },
+                TmEntry {
+                    found: "線程".into(),
+                    scanner_suggested: "執行緒".into(),
+                    user_chose: "線程".into(), // also rejection (stale dup)
+                    context: Some("old".into()),
+                    timestamp: "2026-03-02".into(),
+                },
+            ],
+        };
+        std::fs::write(&path, serde_json::to_string(&duped).unwrap()).unwrap();
+
+        let mut store = TranslationMemoryStore::open(&path).unwrap();
+        assert!(store.should_suppress("線程")); // last entry is rejection
+
+        // Now accept via record: should update the LAST entry.
+        store
+            .record(TmEntry {
+                found: "線程".into(),
+                scanner_suggested: "執行緒".into(),
+                user_chose: "執行緒".into(), // acceptance
+                context: None,
+                timestamp: "2026-03-19".into(),
+            })
+            .unwrap();
+
+        // should_suppress reads last entry, which is now acceptance.
+        assert!(!store.should_suppress("線程"));
+        // First (stale) entry is unchanged; record updated the last one.
+        assert_eq!(store.list()[0].user_chose, "線程");
+        assert_eq!(store.list()[1].user_chose, "執行緒");
     }
 }

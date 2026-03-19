@@ -87,6 +87,12 @@ fn main() -> Result<()> {
     let mut setup_host: Option<String> = None;
     let mut pack_cmd: Option<String> = None;
     let mut pack_arg: Option<String> = None;
+    let mut tm_cmd: Option<String> = None;
+    let mut tm_arg: Option<String> = None;
+    let mut tm_record_found: Option<String> = None;
+    let mut tm_record_suggested: Option<String> = None;
+    let mut tm_record_chose: Option<String> = None;
+    let mut tm_record_context: Option<String> = None;
     let mut i = 1;
 
     while i < args.len() {
@@ -284,6 +290,66 @@ fn main() -> Result<()> {
                     overrides_path.unwrap_or_else(zhtw_mcp::rules::store::default_overrides_path),
                 );
             }
+            "tm" => {
+                i += 1;
+                let subcmd = args
+                    .get(i)
+                    .context("tm requires a subcommand (list|export|import|clear|record)")?
+                    .clone();
+                match subcmd.as_str() {
+                    "export" | "import" => {
+                        i += 1;
+                        tm_arg = Some(
+                            args.get(i)
+                                .context(format!("tm {subcmd} requires a file path"))?
+                                .clone(),
+                        );
+                    }
+                    "record" => {
+                        // Parse --found, --suggested, --chose, --context key-value args.
+                        i += 1;
+                        while i < args.len() && args[i].starts_with("--") {
+                            match args[i].as_str() {
+                                "--found" => {
+                                    i += 1;
+                                    tm_record_found = Some(
+                                        args.get(i).context("--found requires a value")?.clone(),
+                                    );
+                                }
+                                "--suggested" => {
+                                    i += 1;
+                                    tm_record_suggested = Some(
+                                        args.get(i)
+                                            .context("--suggested requires a value")?
+                                            .clone(),
+                                    );
+                                }
+                                "--chose" => {
+                                    i += 1;
+                                    tm_record_chose = Some(
+                                        args.get(i).context("--chose requires a value")?.clone(),
+                                    );
+                                }
+                                "--context" => {
+                                    i += 1;
+                                    tm_record_context = Some(
+                                        args.get(i).context("--context requires a value")?.clone(),
+                                    );
+                                }
+                                other => {
+                                    anyhow::bail!("unknown tm record flag: {other}");
+                                }
+                            }
+                            i += 1;
+                        }
+                        // Back up one so the outer loop's i += 1 doesn't skip.
+                        i -= 1;
+                    }
+                    "list" | "clear" => {}
+                    _ => {} // let run_tm_cmd report the error
+                }
+                tm_cmd = Some(subcmd);
+            }
             "pack" => {
                 i += 1;
                 let subcmd = args
@@ -332,6 +398,30 @@ fn main() -> Result<()> {
             return run_translation_guide();
         }
         return run_setup(host_str);
+    }
+
+    // TM subcommand: manage translation memory.
+    // Respect .zhtw-mcp.toml translation_memory override so `tm record`
+    // writes to the same file that `lint` reads.
+    if let Some(cmd) = tm_cmd {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let project_cfg = match &config_path {
+            Some(p) => zhtw_mcp::config::ProjectConfig::from_file(p).ok(),
+            None => zhtw_mcp::config::ProjectConfig::discover(&cwd),
+        };
+        let tm_path = project_cfg
+            .as_ref()
+            .and_then(|c| c.translation_memory.as_ref().map(PathBuf::from))
+            .unwrap_or_else(|| zhtw_mcp::rules::store::discover_tm_path(&cwd));
+        return run_tm_cmd(
+            &cmd,
+            tm_arg.as_deref(),
+            &tm_path,
+            tm_record_found.as_deref(),
+            tm_record_suggested.as_deref(),
+            tm_record_chose.as_deref(),
+            tm_record_context.as_deref(),
+        );
     }
 
     // Pack subcommand: manage rule packs.
@@ -384,6 +474,14 @@ fn main() -> Result<()> {
             }
         }
 
+        // Resolve TM path: config override > auto-discover from cwd.
+        let eff_tm_path = cfg_ref
+            .and_then(|c| c.translation_memory.as_ref().map(PathBuf::from))
+            .unwrap_or_else(|| {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                zhtw_mcp::rules::store::discover_tm_path(&cwd)
+            });
+
         return run_lint_batch(&LintBatchParams {
             file_args: &lint_files,
             format: lint_format,
@@ -405,6 +503,7 @@ fn main() -> Result<()> {
             verify,
             detect_ai,
             ai_threshold_multiplier,
+            tm_path: Some(eff_tm_path),
         });
     }
 
@@ -422,8 +521,30 @@ fn main() -> Result<()> {
     let store = zhtw_mcp::rules::store::OverrideStore::open(&overrides_path)?;
     let suppression_store = zhtw_mcp::rules::store::SuppressionStore::open(&suppressions_path)?;
     let pack_store = zhtw_mcp::rules::store::PackStore::new(packs_dir);
-    let mut server =
-        zhtw_mcp::mcp::tools::Server::new(store, suppression_store, pack_store, active_packs)?;
+
+    // Discover translation memory in project root.
+    let tm_store = {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let tm_path = zhtw_mcp::rules::store::discover_tm_path(&cwd);
+        match zhtw_mcp::rules::store::TranslationMemoryStore::open(&tm_path) {
+            Ok(store) => Some(store),
+            Err(e) => {
+                log::warn!(
+                    "failed to open translation memory at {}: {e}",
+                    tm_path.display()
+                );
+                None
+            }
+        }
+    };
+
+    let mut server = zhtw_mcp::mcp::tools::Server::new(
+        store,
+        suppression_store,
+        pack_store,
+        active_packs,
+        tm_store,
+    )?;
 
     log::info!("zhtw-mcp server starting on stdio");
 
@@ -472,6 +593,7 @@ struct LintBatchParams<'a> {
     verify: bool,
     detect_ai: bool,
     ai_threshold_multiplier: f32,
+    tm_path: Option<PathBuf>,
 }
 
 fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
@@ -507,6 +629,13 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
     let ruleset_hash = zhtw_mcp::rules::loader::compute_ruleset_hash(&spelling_rules, &case_rules);
     let scanner = zhtw_mcp::engine::scan::Scanner::new(spelling_rules, case_rules);
     let s2t = zhtw_mcp::engine::s2t::S2TConverter::new();
+
+    // Open translation memory (if path provided and file exists/creatable).
+    let tm_store = params.tm_path.as_ref().and_then(|p| {
+        zhtw_mcp::rules::store::TranslationMemoryStore::open(p)
+            .map_err(|e| log::warn!("failed to open TM at {}: {e}", p.display()))
+            .ok()
+    });
 
     // Scan cache: skip re-scanning unchanged files (lint-only, no fix).
     // Disabled when --verify is active (calibrate_issues needs the full text).
@@ -722,11 +851,21 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             scanner.scan_for_content_type_with_config(input, content_type, cfg)
         };
 
-        // Apply fixes if requested.
+        // Apply fixes if requested. Filter out TM-suppressed issues so the
+        // fixer does not auto-correct terms the user deliberately rejected.
         let fix_result = if params.fix_mode != zhtw_mcp::fixer::FixMode::None {
+            let fix_issues: Vec<_> = if let Some(ref tm) = tm_store {
+                issues
+                    .iter()
+                    .filter(|i| !tm.should_suppress(&i.found))
+                    .cloned()
+                    .collect()
+            } else {
+                issues.clone()
+            };
             Some(zhtw_mcp::fixer::apply_fixes_with_context(
                 &text,
-                &issues,
+                &fix_issues,
                 params.fix_mode,
                 &[],
                 Some(scanner.segmenter()),
@@ -820,6 +959,32 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
             report_issues
         };
 
+        // Apply TM suppressions: downgrade rejected terms to Info severity.
+        // Only lexical/contextual issue types; orthographic types are immune.
+        let mut tm_suppressed: usize = 0;
+        let report_issues = if let Some(ref tm) = tm_store {
+            let mut issues = report_issues;
+            for issue in &mut issues {
+                match issue.rule_type {
+                    zhtw_mcp::rules::ruleset::IssueType::Punctuation
+                    | zhtw_mcp::rules::ruleset::IssueType::Case
+                    | zhtw_mcp::rules::ruleset::IssueType::Variant
+                    | zhtw_mcp::rules::ruleset::IssueType::Grammar
+                    | zhtw_mcp::rules::ruleset::IssueType::AiStyle => continue,
+                    _ => {}
+                }
+                if tm.should_suppress(&issue.found)
+                    && issue.severity != zhtw_mcp::rules::ruleset::Severity::Info
+                {
+                    issue.severity = zhtw_mcp::rules::ruleset::Severity::Info;
+                    tm_suppressed += 1;
+                }
+            }
+            issues
+        } else {
+            report_issues
+        };
+
         // --update-baseline: add all issues to the baseline.
         if params.update_baseline {
             for issue in &report_issues {
@@ -869,6 +1034,9 @@ fn run_lint_batch(params: &LintBatchParams<'_>) -> Result<()> {
                     "errors": error_count,
                     "warnings": warning_count,
                 });
+                if tm_suppressed > 0 {
+                    output["tm_suppressed"] = serde_json::json!(tm_suppressed);
+                }
                 if let Some(ref fix) = fix_result {
                     output["fixes_applied"] = serde_json::json!(fix.applied);
                     output["fixes_skipped"] = serde_json::json!(fix.skipped);
@@ -1423,6 +1591,76 @@ fn run_translation_guide() -> Result<()> {
 }
 
 // Pack subcommand
+
+fn run_tm_cmd(
+    cmd: &str,
+    arg: Option<&str>,
+    tm_path: &std::path::Path,
+    record_found: Option<&str>,
+    record_suggested: Option<&str>,
+    record_chose: Option<&str>,
+    record_context: Option<&str>,
+) -> Result<()> {
+    use zhtw_mcp::rules::store::{iso_date_today, TmEntry, TranslationMemoryStore};
+
+    match cmd {
+        "list" => {
+            let store = TranslationMemoryStore::open(tm_path)?;
+            let entries = store.list();
+            if entries.is_empty() {
+                eprintln!("Translation memory is empty.");
+            } else {
+                let json = serde_json::to_string_pretty(entries)?;
+                println!("{json}");
+            }
+            Ok(())
+        }
+        "export" => {
+            let dest = arg.context("tm export requires a file path")?;
+            let store = TranslationMemoryStore::open(tm_path)?;
+            store.export(Path::new(dest))?;
+            eprintln!("Exported TM ({} entries) to {dest}", store.list().len());
+            Ok(())
+        }
+        "import" => {
+            let src = arg.context("tm import requires a file path")?;
+            let mut store = TranslationMemoryStore::open(tm_path)?;
+            let (added, updated) = store.import(Path::new(src))?;
+            eprintln!(
+                "Imported {added} new, {updated} updated ({} total)",
+                store.list().len()
+            );
+            Ok(())
+        }
+        "clear" => {
+            let mut store = TranslationMemoryStore::open(tm_path)?;
+            store.clear()?;
+            eprintln!("Translation memory cleared.");
+            Ok(())
+        }
+        "record" => {
+            let found = record_found.context("tm record requires --found")?;
+            let suggested = record_suggested.context("tm record requires --suggested")?;
+            let chose = record_chose.context("tm record requires --chose")?;
+
+            let mut store = TranslationMemoryStore::open(tm_path)?;
+            store.record(TmEntry {
+                found: found.to_string(),
+                scanner_suggested: suggested.to_string(),
+                user_chose: chose.to_string(),
+                context: record_context.map(String::from),
+                timestamp: iso_date_today(),
+            })?;
+            eprintln!("Recorded: '{found}' -> chose '{chose}'");
+            Ok(())
+        }
+        _ => {
+            anyhow::bail!(
+                "unknown tm subcommand: '{cmd}' (expected list|export|import|clear|record)"
+            );
+        }
+    }
+}
 
 fn run_pack_cmd(cmd: &str, arg: Option<&str>, packs_dir: &std::path::Path) -> Result<()> {
     use zhtw_mcp::rules::store::PackStore;
