@@ -548,6 +548,17 @@ pub(crate) fn is_sampling_eligible(
     issue.english.is_some() && (issue.suggestions.len() > 1 || issue.context_clues.is_some())
 }
 
+/// Sampling budget usage statistics returned by `refine_issues_with_sampling`.
+///
+/// Included in the tool response JSON so clients can observe budget exhaustion.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SamplingStats {
+    /// Number of sampling calls actually made.
+    pub used: usize,
+    /// Number of eligible issues skipped because the budget was exhausted.
+    pub skipped: usize,
+}
+
 /// Refine issues using sampling.  For each eligible issue (up to budget),
 /// ask the host LLM to disambiguate.  If the LLM confirms a specific
 /// suggestion, promote that suggestion to the front; if it rejects the
@@ -555,21 +566,40 @@ pub(crate) fn is_sampling_eligible(
 ///
 /// Pre-collects eligible issues and uses a semantic cache to avoid redundant
 /// LLM calls for the same term in similar contexts within a single invocation.
+///
+/// Returns `SamplingStats` with usage and skip counts for observability.
 pub(crate) fn refine_issues_with_sampling(
     issues: &mut [Issue],
     bridge: &mut SamplingBridge<'_>,
     text: &str,
     ambiguous_threshold: f32,
     decided_threshold: f32,
-) {
+) -> SamplingStats {
+    let used_before = bridge.used();
+
     if !bridge.has_budget() {
-        return;
+        // Count all eligible issues as skipped when budget is already zero.
+        let skipped = issues
+            .iter()
+            .filter(|i| is_sampling_eligible(i, ambiguous_threshold, decided_threshold))
+            .count();
+        return SamplingStats { used: 0, skipped };
     }
 
     // Collect eligible issue indices with their context windows.
     let mut eligible: Vec<(usize, String)> = Vec::new();
+    let mut uncollected_skipped = 0usize;
+    let cap = bridge
+        .budget
+        .saturating_sub(bridge.used())
+        .saturating_mul(10);
+
     for (idx, issue) in issues.iter().enumerate() {
         if !is_sampling_eligible(issue, ambiguous_threshold, decided_threshold) {
+            continue;
+        }
+        if eligible.len() >= cap {
+            uncollected_skipped += 1;
             continue;
         }
         let start = text.floor_char_boundary(issue.offset.saturating_sub(120));
@@ -581,25 +611,21 @@ pub(crate) fn refine_issues_with_sampling(
                 .min(text.len()),
         );
         eligible.push((idx, text[start..end].to_string()));
-        // Cap collection to avoid unbounded allocation on large docs.
-        // Use 10x remaining budget to leave headroom for cache dedup
-        // (which filters duplicates only during iteration below).
-        if eligible.len() >= bridge.budget.saturating_sub(bridge.used).saturating_mul(10) {
-            break;
-        }
     }
 
-    if eligible.is_empty() {
-        return;
+    if eligible.is_empty() && uncollected_skipped == 0 {
+        return SamplingStats::default();
     }
 
     // Semantic cache: avoid redundant LLM calls for the same term in
     // similar contexts within a single invocation.
     let mut cache = DisambiguationCache::new();
+    let mut skipped = uncollected_skipped;
 
     for (idx, context_window) in &eligible {
         if !bridge.has_budget() {
-            break;
+            skipped += 1;
+            continue;
         }
         let issue = &mut issues[*idx];
 
@@ -642,6 +668,11 @@ pub(crate) fn refine_issues_with_sampling(
                 ));
             }
         }
+    }
+
+    SamplingStats {
+        used: bridge.used() - used_before,
+        skipped,
     }
 }
 
@@ -1402,5 +1433,105 @@ mod tests {
             .unwrap();
         assert!(user_text.contains("<text_fragment_"));
         assert!(user_text.contains("</text_fragment_"));
+    }
+
+    // --- 25.3: sampling budget exhaustion stats ---
+
+    #[test]
+    fn refine_returns_stats_with_budget_exhaustion() {
+        // Create 7 eligible issues (all confusable with english + multi-suggestion).
+        // Budget = 2, timeout = 10ms.  Expect used=2, skipped=5.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let terms = [
+            ("並行", "parallelism"),
+            ("程序", "program"),
+            ("軟件", "software"),
+            ("內存", "memory"),
+            ("線程", "thread"),
+            ("算法", "algorithm"),
+            ("信息", "information"),
+        ];
+
+        let text = "並行程序軟件內存線程算法信息";
+        let mut offset = 0usize;
+        let mut issues: Vec<Issue> = terms
+            .iter()
+            .map(|&(found, english)| {
+                let len = found.len();
+                let mut issue = Issue::new(
+                    offset,
+                    len,
+                    found,
+                    vec!["台灣A".into(), "台灣B".into()],
+                    IssueType::Confusable,
+                    Severity::Warning,
+                )
+                .with_english(english);
+                issue.line = 1;
+                issue.col = offset + 1;
+                offset += len;
+                issue
+            })
+            .collect();
+
+        let (_tx, rx) = mpsc::channel::<StdinMsg>();
+        let mut writer = Cursor::new(Vec::new());
+        // Budget = 2, short timeout so calls fail fast.
+        let mut bridge = SamplingBridge::new(&mut writer, &rx, Duration::from_millis(10), 2);
+
+        let stats = refine_issues_with_sampling(&mut issues, &mut bridge, text, 0.3, 0.8);
+
+        // 2 calls made (both timeout), 5 eligible issues skipped.
+        assert_eq!(stats.used, 2, "should have used 2 budget slots");
+        assert_eq!(stats.skipped, 5, "should have skipped 5 eligible issues");
+    }
+
+    #[test]
+    fn refine_returns_zero_stats_when_no_eligible_issues() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Single-suggestion, no context_clues, no english = not eligible.
+        let mut issues = vec![{
+            let mut i = Issue::new(
+                0,
+                6,
+                "軟件",
+                vec!["軟體".into()],
+                IssueType::CrossStrait,
+                Severity::Warning,
+            );
+            i.line = 1;
+            i.col = 1;
+            i
+        }];
+
+        let (_tx, rx) = mpsc::channel::<StdinMsg>();
+        let mut writer = Cursor::new(Vec::new());
+        let mut bridge = SamplingBridge::new(&mut writer, &rx, Duration::from_millis(10), 5);
+
+        let stats = refine_issues_with_sampling(&mut issues, &mut bridge, "軟件", 0.3, 0.8);
+
+        assert_eq!(stats.used, 0);
+        assert_eq!(stats.skipped, 0);
+    }
+
+    #[test]
+    fn refine_returns_all_skipped_when_budget_zero() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut issues = vec![
+            make_confusable_issue("並行", vec!["平行", "並行"], "parallelism"),
+            make_confusable_issue("程序", vec!["程式", "程序"], "program"),
+            make_confusable_issue("軟件", vec!["軟體", "軟件"], "software"),
+        ];
+
+        let (_tx, rx) = mpsc::channel::<StdinMsg>();
+        let mut writer = Cursor::new(Vec::new());
+        // Budget = 0: all eligible issues are skipped immediately.
+        let mut bridge = SamplingBridge::new(&mut writer, &rx, Duration::from_millis(10), 0);
+
+        let stats = refine_issues_with_sampling(&mut issues, &mut bridge, "ctx", 0.3, 0.8);
+
+        assert_eq!(stats.used, 0);
+        assert_eq!(stats.skipped, 3, "all 3 eligible issues should be skipped");
     }
 }

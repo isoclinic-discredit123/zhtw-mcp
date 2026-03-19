@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use super::prompts;
 use super::resources;
-use super::sampling::{refine_issues_with_sampling, SamplingBridge};
+use super::sampling::{refine_issues_with_sampling, SamplingBridge, SamplingStats};
 use super::types::{
     CallToolParams, CallToolResult, ClientCapabilities, InitializeParams, InitializeResult,
     JsonRpcRequest, JsonRpcResponse, PromptCapability, PromptGetParams, ResourceCapability,
@@ -403,9 +403,11 @@ impl Server {
                     None
                 };
 
-                if let Some(b) = bridge.as_mut() {
-                    refine_issues_with_sampling(&mut issues, b, text, 0.3, 0.8);
-                }
+                let sampling_stats = if let Some(b) = bridge.as_mut() {
+                    refine_issues_with_sampling(&mut issues, b, text, 0.3, 0.8)
+                } else {
+                    SamplingStats::default()
+                };
                 self.apply_suppressions(&mut issues);
                 let tm_suppressed = self.apply_tm(&mut issues);
                 apply_ignore_set(&mut issues, &ignore_set);
@@ -434,6 +436,7 @@ impl Server {
                     calibrate_result,
                     ai_signature: ai_signature.as_ref(),
                     tm_suppressed,
+                    sampling_stats,
                 })
             }
 
@@ -464,9 +467,11 @@ impl Server {
                     None
                 };
 
-                if let Some(b) = bridge.as_mut() {
-                    refine_issues_with_sampling(&mut issues, b, text, 0.3, 0.8);
-                }
+                let sampling_stats = if let Some(b) = bridge.as_mut() {
+                    refine_issues_with_sampling(&mut issues, b, text, 0.3, 0.8)
+                } else {
+                    SamplingStats::default()
+                };
 
                 self.apply_suppressions(&mut issues);
                 // TM is NOT applied here: the fixer filter (should_suppress)
@@ -597,6 +602,7 @@ impl Server {
                     calibrate_result,
                     ai_signature: ai_signature.as_ref(),
                     tm_suppressed,
+                    sampling_stats,
                 })
             }
         }
@@ -1067,6 +1073,14 @@ struct IssueSummary {
     /// Omitted (0) when TM is inactive or had no effect.
     #[serde(skip_serializing_if = "is_zero")]
     tm_suppressed: usize,
+    /// Number of sampling calls made during this invocation.
+    /// Omitted (0) when sampling is inactive or unused.
+    #[serde(skip_serializing_if = "is_zero")]
+    sampling_used: usize,
+    /// Number of eligible issues skipped because the sampling budget was exhausted.
+    /// Omitted (0) when budget was not exhausted.
+    #[serde(skip_serializing_if = "is_zero")]
+    sampling_skipped: usize,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -1199,12 +1213,18 @@ struct SummaryOutput<'a> {
 }
 
 /// Count issues by severity.
-fn build_summary(issues: &[Issue], tm_suppressed: usize) -> IssueSummary {
+fn build_summary(
+    issues: &[Issue],
+    tm_suppressed: usize,
+    sampling_stats: SamplingStats,
+) -> IssueSummary {
     let mut s = IssueSummary {
         errors: 0,
         warnings: 0,
         info: 0,
         tm_suppressed,
+        sampling_used: sampling_stats.used,
+        sampling_skipped: sampling_stats.skipped,
     };
     for issue in issues {
         match issue.severity {
@@ -1243,6 +1263,8 @@ struct CheckOutputParams<'a> {
     ai_signature: Option<&'a crate::engine::ai_score::AiSignatureReport>,
     /// Number of issues downgraded by translation memory.
     tm_suppressed: usize,
+    /// Sampling budget usage statistics.
+    sampling_stats: SamplingStats,
 }
 
 /// Build the unified zhtw JSON response and wrap it in a CallToolResult.
@@ -1255,7 +1277,7 @@ struct CheckOutputParams<'a> {
 /// allocations. Uses compact JSON by default; set `ZHTW_PRETTY=1` env var
 /// for indented output during debugging.
 fn build_check_output(params: &CheckOutputParams<'_>) -> CallToolResult {
-    let summary = build_summary(params.issues, params.tm_suppressed);
+    let summary = build_summary(params.issues, params.tm_suppressed, params.sampling_stats);
 
     let max_err = params.max_errors.unwrap_or(0) as usize;
     let max_warn = params.max_warnings.unwrap_or(0) as usize;
@@ -1848,4 +1870,68 @@ fn tool_definitions() -> Vec<ToolDef> {
             open_world_hint: None,
         }),
     }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn issue_summary_omits_zero_sampling_fields() {
+        let summary = IssueSummary {
+            errors: 1,
+            warnings: 2,
+            info: 0,
+            tm_suppressed: 0,
+            sampling_used: 0,
+            sampling_skipped: 0,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(!json.contains("sampling_used"));
+        assert!(!json.contains("sampling_skipped"));
+        assert!(!json.contains("tm_suppressed"));
+    }
+
+    #[test]
+    fn issue_summary_includes_nonzero_sampling_fields() {
+        let summary = IssueSummary {
+            errors: 0,
+            warnings: 3,
+            info: 1,
+            tm_suppressed: 0,
+            sampling_used: 2,
+            sampling_skipped: 5,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["sampling_used"], 2);
+        assert_eq!(parsed["sampling_skipped"], 5);
+        // tm_suppressed still omitted when zero.
+        assert!(parsed.get("tm_suppressed").is_none());
+    }
+
+    #[test]
+    fn build_summary_threads_sampling_stats() {
+        let issues = vec![
+            Issue::new(0, 3, "foo", vec![], IssueType::CrossStrait, Severity::Error),
+            Issue::new(
+                3,
+                3,
+                "bar",
+                vec![],
+                IssueType::CrossStrait,
+                Severity::Warning,
+            ),
+        ];
+        let stats = SamplingStats {
+            used: 3,
+            skipped: 7,
+        };
+        let summary = build_summary(&issues, 1, stats);
+        assert_eq!(summary.errors, 1);
+        assert_eq!(summary.warnings, 1);
+        assert_eq!(summary.tm_suppressed, 1);
+        assert_eq!(summary.sampling_used, 3);
+        assert_eq!(summary.sampling_skipped, 7);
+    }
 }
