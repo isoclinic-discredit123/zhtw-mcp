@@ -484,6 +484,10 @@ pub struct Scanner {
     /// Per spelling-rule index: which clue_string indices are negative clues.
     /// None when the rule has no negative_context_clues.
     rule_neg_clue_ids: Vec<Option<Vec<u16>>>,
+    /// Per spelling-rule index: true when `rule.from` appears as a substring
+    /// of any `rule.to` entry.  When false, `already_correct_form()` is
+    /// guaranteed to return false and can be skipped entirely.
+    spelling_has_superstring: Vec<bool>,
 }
 
 impl Scanner {
@@ -536,6 +540,16 @@ impl Scanner {
         // String allocations in the scan hot path.
         let spelling_suggestions: Vec<Vec<String>> =
             spelling_rules.iter().map(effective_suggestions).collect();
+
+        // Precompute superstring flag: true when `from` appears as a
+        // substring of any `to` entry, meaning the surrounding text might
+        // already contain the correct form (e.g. from:"算法" in to:"演算法").
+        // ~93% of rules have no superstring relationship, so this flag
+        // lets the hot path skip `already_correct_form()` entirely.
+        let spelling_has_superstring: Vec<bool> = spelling_rules
+            .iter()
+            .map(|r| r.to.iter().any(|t| t.contains(&r.from)))
+            .collect();
 
         let segmenter = Segmenter::from_rules(&spelling_rules);
 
@@ -597,6 +611,29 @@ impl Scanner {
 
             (ac, pos_ids, neg_ids)
         };
+
+        // Validate clue-ID counts fit the fixed bitset in count_clues_in_window
+        // (capacity 32).  Fires at startup, not per-match.
+        for (i, pos) in rule_pos_clue_ids.iter().enumerate() {
+            if let Some(ids) = pos {
+                assert!(
+                    ids.len() <= 32,
+                    "rule '{}' has {} positive clues, exceeds bitset capacity 32",
+                    spelling_rules[i].from,
+                    ids.len(),
+                );
+            }
+        }
+        for (i, neg) in rule_neg_clue_ids.iter().enumerate() {
+            if let Some(ids) = neg {
+                assert!(
+                    ids.len() <= 32,
+                    "rule '{}' has {} negative clues, exceeds bitset capacity 32",
+                    spelling_rules[i].from,
+                    ids.len(),
+                );
+            }
+        }
 
         let spelling_patterns: Vec<&str> = spelling_rules.iter().map(|r| r.from.as_str()).collect();
 
@@ -668,6 +705,7 @@ impl Scanner {
             clue_ac,
             rule_pos_clue_ids,
             rule_neg_clue_ids,
+            spelling_has_superstring,
         }
     }
 

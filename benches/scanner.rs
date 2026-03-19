@@ -387,6 +387,186 @@ fn bench_post_scan_transforms(c: &mut Criterion) {
     group.finish();
 }
 
+// 8. Per-stage CPU attribution on 100KB input
+//
+// Measures each scan stage in isolation to determine where time is spent.
+// Uses ProfileConfig flags to enable/disable individual stages.
+// The difference between "full scan" and "all-off" gives the baseline overhead
+// (detect_chinese_type + line index + sorting).
+
+fn bench_cpu_attribution_100kb(c: &mut Criterion) {
+    use zhtw_mcp::engine::scan::ContentType;
+    use zhtw_mcp::engine::zhtype::detect_chinese_type;
+    use zhtw_mcp::rules::ruleset::{PoliticalStance, ProfileConfig};
+
+    let ruleset = load_embedded_ruleset().expect("load embedded ruleset");
+    let scanner = Scanner::new(ruleset.spelling_rules, ruleset.case_rules);
+    let text = generate_text(102_400);
+
+    // Pre-build excluded ranges once (shared across stage benchmarks).
+    let excluded =
+        zhtw_mcp::engine::scan::build_exclusions_for_content_type(&text, ContentType::Plain);
+
+    // All-off config: measures baseline overhead (detect_chinese_type +
+    // vec alloc + sort + line index).
+    let cfg_none = ProfileConfig {
+        spelling: false,
+        casing: false,
+        basic_punctuation: false,
+        colon_enforcement: false,
+        dunhao_detection: false,
+        range_normalization: false,
+        variant_normalization: false,
+        ellipsis_normalization: false,
+        range_en_dash: false,
+        grammar_checks: false,
+        ai_filler_detection: false,
+        ai_semantic_safety: false,
+        ai_density_detection: false,
+        ai_structural_patterns: false,
+        ai_threshold_multiplier: 1.0,
+        political_stance: PoliticalStance::RocCentric,
+    };
+
+    // Spelling-only config.
+    let cfg_spelling = ProfileConfig {
+        spelling: true,
+        ..cfg_none
+    };
+
+    // Punctuation + spacing only (basic_punctuation gates both scan_punctuation
+    // and scan_spacing + scan_cn_curly_quotes).
+    let cfg_punct = ProfileConfig {
+        basic_punctuation: true,
+        colon_enforcement: true,
+        dunhao_detection: true,
+        range_normalization: true,
+        ellipsis_normalization: true,
+        ..cfg_none
+    };
+
+    // Grammar-only config.
+    let cfg_grammar = ProfileConfig {
+        grammar_checks: true,
+        ..cfg_none
+    };
+
+    // Case-only config.
+    let cfg_case = ProfileConfig {
+        casing: true,
+        ..cfg_none
+    };
+
+    // Full default config.
+    let cfg_full = Profile::Default.config();
+
+    let mut group = c.benchmark_group("cpu_attribution_100kb");
+
+    // Stage 0: detect_chinese_type alone.
+    group.bench_function("detect_chinese_type", |b| {
+        b.iter(|| {
+            let t = detect_chinese_type(black_box(&text));
+            black_box(t);
+        });
+    });
+
+    // Stage 0b: build exclusion ranges.
+    group.bench_function("build_exclusions_plain", |b| {
+        b.iter(|| {
+            let e = zhtw_mcp::engine::scan::build_exclusions_for_content_type(
+                black_box(&text),
+                ContentType::Plain,
+            );
+            black_box(&e);
+        });
+    });
+
+    // Stage 0c: baseline (all checks off).
+    group.bench_function("baseline_no_checks", |b| {
+        b.iter(|| {
+            let out = scanner.scan_with_config(black_box(&text), black_box(&excluded), cfg_none);
+            black_box(&out);
+        });
+    });
+
+    // Stage 1: spelling AC only.
+    group.bench_function("spelling_only", |b| {
+        b.iter(|| {
+            let out =
+                scanner.scan_with_config(black_box(&text), black_box(&excluded), cfg_spelling);
+            black_box(&out);
+        });
+    });
+
+    // Stage 2: case AC only.
+    group.bench_function("case_only", |b| {
+        b.iter(|| {
+            let out = scanner.scan_with_config(black_box(&text), black_box(&excluded), cfg_case);
+            black_box(&out);
+        });
+    });
+
+    // Stage 3: punctuation + spacing + ellipsis.
+    group.bench_function("punctuation_spacing", |b| {
+        b.iter(|| {
+            let out = scanner.scan_with_config(black_box(&text), black_box(&excluded), cfg_punct);
+            black_box(&out);
+        });
+    });
+
+    // Stage 4: grammar only.
+    group.bench_function("grammar_only", |b| {
+        b.iter(|| {
+            let out = scanner.scan_with_config(black_box(&text), black_box(&excluded), cfg_grammar);
+            black_box(&out);
+        });
+    });
+
+    // Stage 5: full default profile (reference).
+    group.bench_function("full_default", |b| {
+        b.iter(|| {
+            let out = scanner.scan_with_config(black_box(&text), black_box(&excluded), cfg_full);
+            black_box(&out);
+        });
+    });
+
+    // Post-scan overhead: LineIndex construction + line/col lookups.
+    // This cost is hidden inside spelling_only (which produces issues)
+    // but absent from baseline_no_checks (which early-returns on 0 issues).
+    group.bench_function("lineindex_100kb", |b| {
+        use zhtw_mcp::engine::lineindex::{ColumnEncoding, LineIndex};
+        // Pre-collect valid char-boundary offsets for lookup simulation.
+        let offsets: Vec<usize> = text
+            .char_indices()
+            .step_by(text.chars().count() / 200)
+            .map(|(i, _)| i)
+            .collect();
+        b.iter(|| {
+            let idx = LineIndex::new(black_box(&text));
+            let mut sum = 0usize;
+            for &off in &offsets {
+                let (line, col) = idx.line_col(off, ColumnEncoding::Utf16);
+                sum += line + col;
+            }
+            black_box(sum);
+        });
+    });
+
+    // Markdown exclusion (real-world content type, vs plain above).
+    group.bench_function("build_exclusions_markdown", |b| {
+        let md = generate_markdown(102_400);
+        b.iter(|| {
+            let e = zhtw_mcp::engine::scan::build_exclusions_for_content_type(
+                black_box(&md),
+                ContentType::Markdown,
+            );
+            black_box(&e);
+        });
+    });
+
+    group.finish();
+}
+
 // Criterion harness
 
 criterion_group!(
@@ -400,5 +580,6 @@ criterion_group!(
     bench_markdown_exclusion,
     bench_segmenter,
     bench_post_scan_transforms,
+    bench_cpu_attribution_100kb,
 );
 criterion_main!(benches);

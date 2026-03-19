@@ -71,12 +71,19 @@ impl Scanner {
         // have context_clues, so most matches skip the clue AC entirely.
         let mut clue_hits_cache: Option<ClueHits> = None;
 
+        // Exclusion cursor: both AC iterators yield matches in increasing
+        // start order, so we advance a cursor through the sorted excluded
+        // ranges for amortized O(1) exclusion checks instead of O(log E)
+        // binary search per match.
+        let mut excl_cursor: usize = 0;
+
         // Dispatch to charwise AC when available; fall back to bytewise.
         if let Some(ref cw_ac) = self.spelling_ac_charwise {
             for mat in cw_ac.leftmost_find_iter(text) {
                 self.process_spelling_match(
                     text,
                     excluded,
+                    &mut excl_cursor,
                     zh_type,
                     issues,
                     cfg,
@@ -91,6 +98,7 @@ impl Scanner {
                 self.process_spelling_match(
                     text,
                     excluded,
+                    &mut excl_cursor,
                     zh_type,
                     issues,
                     cfg,
@@ -111,6 +119,7 @@ impl Scanner {
         &self,
         text: &str,
         excluded: &[ByteRange],
+        excl_cursor: &mut usize,
         zh_type: ChineseType,
         issues: &mut Vec<Issue>,
         cfg: &ProfileConfig,
@@ -144,13 +153,24 @@ impl Scanner {
             return;
         }
 
-        // Skip if the match overlaps any excluded range.
-        if is_excluded(start, end, excluded) {
+        // Exclusion check with advancing cursor.  AC matches arrive in
+        // increasing start order, so we advance past ranges that end
+        // before the current match for amortized O(1) instead of
+        // O(log E) binary search.
+        while *excl_cursor < excluded.len() && excluded[*excl_cursor].end <= start {
+            *excl_cursor += 1;
+        }
+        if *excl_cursor < excluded.len()
+            && excluded[*excl_cursor].start < end
+            && start < excluded[*excl_cursor].end
+        {
             return;
         }
 
         // Skip if surrounding text already contains a correct form.
-        if already_correct_form(text, start, rule) {
+        // Short-circuit: most rules have no superstring relationship between
+        // `from` and any `to` entry, so the check is guaranteed false.
+        if self.spelling_has_superstring[rule_idx] && already_correct_form(text, start, rule) {
             return;
         }
 
@@ -159,8 +179,9 @@ impl Scanner {
         // the matched pattern spans two distinct words — e.g. "積分" found
         // inside "累積分佈" (累積 + 分佈), "程序" inside "排程序列"
         // (排程 + 序列), "導出" inside "引導出" (引導 + 出).
-        if self.segmenter.word_straddles_boundary(text, start)
-            || self.segmenter.word_straddles_boundary(text, end)
+        if self
+            .segmenter
+            .match_straddles_word_boundary(text, start, end)
         {
             return;
         }
@@ -360,9 +381,10 @@ fn find_first_paragraph_break(bytes: &[u8]) -> Option<usize> {
 /// fall inside [win_start, win_end) — this prevents clues that start inside
 /// the window but bleed past the right boundary from being counted.
 ///
-/// Uses binary search to skip to the window start, then linear scan within
-/// the window.  For typical documents (H ≈ 100-500 clue hits, C ≈ 3-8 clues
-/// per rule), this is effectively O(C + window_hits).
+/// Uses binary search to skip to the window start, then a single linear scan
+/// over the window hits.  Each hit's clue ID is checked against needle_ids
+/// via linear search (needle_ids is typically 3-8 entries).
+/// Complexity: O(log H + window_hits * C) where C is small and constant.
 fn count_clues_in_window(
     clue_hits: &ClueHits,
     needle_ids: &[u16],
@@ -374,13 +396,25 @@ fn count_clues_in_window(
     }
     // Binary search to the first hit at or after win_start.
     let lo = clue_hits.partition_point(|&(off, _, _)| off < win_start);
-    needle_ids
-        .iter()
-        .filter(|&&nid| {
-            clue_hits[lo..]
-                .iter()
-                .take_while(|&&(off, _, _)| off < win_end)
-                .any(|&(_, end, cid)| cid == nid && end <= win_end)
-        })
-        .count()
+    // Single pass over window hits, tracking which needle IDs we have seen.
+    // needle_ids is small (typically 3-8, max ~21 for rules like "程序"),
+    // so a fixed-size bitset is faster than a HashSet.  Capacity validated
+    // at Scanner::new() time (max_clue_ids_per_rule <= 32).
+    let mut found = 0usize;
+    let mut seen = [false; 32];
+    for &(off, end, cid) in &clue_hits[lo..] {
+        if off >= win_end {
+            break;
+        }
+        if end > win_end {
+            continue;
+        }
+        if let Some(pos) = needle_ids.iter().position(|&nid| nid == cid) {
+            if !seen[pos] {
+                seen[pos] = true;
+                found += 1;
+            }
+        }
+    }
+    found
 }

@@ -323,6 +323,48 @@ impl Segmenter {
             return false;
         }
 
+        // Fast guard: if the char immediately before the boundary is not CJK,
+        // the backward walk will produce zero start positions and the function
+        // is guaranteed to return false.  Avoids the loop setup cost for
+        // boundaries at ASCII, whitespace, or punctuation edges.
+        if boundary > 0 {
+            let prev = text.floor_char_boundary(boundary - 1);
+            if let Some(ch) = text[prev..].chars().next() {
+                if !is_cjk_ideograph(ch) {
+                    return false;
+                }
+            }
+        } else {
+            return false;
+        }
+
+        // Similarly, if the char at the boundary (the first char after it)
+        // is not CJK, no dictionary word can extend across it.
+        if boundary < text.len() {
+            if let Some(ch) = text[boundary..].chars().next() {
+                if !is_cjk_ideograph(ch) {
+                    return false;
+                }
+            }
+        } else {
+            return false;
+        }
+
+        self.word_straddles_boundary_inner(text, boundary)
+    }
+
+    /// Check whether a known dictionary word straddles either edge of the
+    /// byte range [start, end).  Combined check avoids two separate function
+    /// calls for the same match span.
+    pub fn match_straddles_word_boundary(&self, text: &str, start: usize, end: usize) -> bool {
+        self.word_straddles_boundary(text, start) || self.word_straddles_boundary(text, end)
+    }
+
+    /// Inner implementation of boundary straddling check, called after
+    /// the fast CJK guard has confirmed both sides are CJK.
+    fn word_straddles_boundary_inner(&self, text: &str, boundary: usize) -> bool {
+        use super::scan::is_cjk_ideograph;
+
         let max_back = self.max_word_len.saturating_sub(1);
 
         // Collect up to max_back start positions before the boundary on the
