@@ -121,6 +121,19 @@ impl JsonRpcResponse {
             }),
         }
     }
+
+    pub fn error_with_data(id: Option<RequestId>, code: i64, message: String, data: Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION,
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message,
+                data: Some(data),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

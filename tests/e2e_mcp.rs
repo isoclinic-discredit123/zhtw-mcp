@@ -1437,3 +1437,83 @@ fn e2e_exit_without_shutdown_exits_nonzero() {
         "exit without prior shutdown should exit with non-zero code"
     );
 }
+
+// -- Reject unknown parameters in tools/call --
+
+#[test]
+fn e2e_reject_unknown_params() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    // Send tools/call with a known typo (max_error instead of max_errors)
+    // and an entirely unknown field.
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 900,
+            "params": {
+                "name": "zhtw",
+                "arguments": {
+                    "text": "hi",
+                    "unknownField": 1,
+                    "max_error": 5
+                }
+            }
+        }),
+    );
+
+    // Must be INVALID_PARAMS (-32602).
+    let err = resp.get("error").expect("expected error response");
+    assert_eq!(err["code"].as_i64().unwrap(), -32602);
+
+    // data.unexpected must list both unknown keys.
+    let data = err.get("data").expect("expected structured data field");
+    let unexpected = data["unexpected"]
+        .as_array()
+        .expect("unexpected should be an array");
+    let keys: Vec<&str> = unexpected.iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(
+        keys.contains(&"unknownField"),
+        "missing unknownField in {keys:?}"
+    );
+    assert!(keys.contains(&"max_error"), "missing max_error in {keys:?}");
+
+    // Clean up.
+    drop(stdin);
+    let _ = child.wait();
+}
+
+#[test]
+fn e2e_all_known_params_accepted() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    // Send tools/call with only known parameters — should succeed (no error).
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 901,
+            "params": {
+                "name": "zhtw",
+                "arguments": {
+                    "text": "測試文字",
+                    "max_errors": 0
+                }
+            }
+        }),
+    );
+
+    // Should be a successful result, not an error.
+    assert!(
+        resp.get("error").is_none(),
+        "expected success but got error: {resp}"
+    );
+    assert!(resp.get("result").is_some(), "expected result field");
+
+    drop(stdin);
+    let _ = child.wait();
+}

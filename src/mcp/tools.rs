@@ -274,6 +274,12 @@ impl Server {
             Err(resp) => return resp,
         };
 
+        if params.name == "zhtw" {
+            if let Some(resp) = reject_unknown_params(&params.arguments, req.id.clone()) {
+                return resp;
+            }
+        }
+
         let result = match params.name.as_str() {
             "zhtw" => self.tool_check(&params.arguments, bridge),
             _ => CallToolResult::error(format!("unknown tool: {}", params.name)),
@@ -731,6 +737,77 @@ fn parse_params<T: serde::de::DeserializeOwned>(
             format!("invalid {method} parameters"),
         )
     })
+}
+
+/// Known parameter names for the `zhtw` tool, kept in sync with
+/// `tool_definitions()` schema properties. Any key in `arguments` not in this
+/// set triggers INVALID_PARAMS (-32602) with structured `data.unexpected`.
+fn zhtw_known_params() -> &'static [&'static str] {
+    #[cfg(feature = "translate")]
+    {
+        &[
+            "text",
+            "fix_mode",
+            "max_errors",
+            "max_warnings",
+            "profile",
+            "content_type",
+            "political_stance",
+            "ignore_terms",
+            "explain",
+            "fix_output",
+            "verify",
+            "output",
+            "detect_ai",
+            "ai_threshold",
+        ]
+    }
+    #[cfg(not(feature = "translate"))]
+    {
+        &[
+            "text",
+            "fix_mode",
+            "max_errors",
+            "max_warnings",
+            "profile",
+            "content_type",
+            "political_stance",
+            "ignore_terms",
+            "explain",
+            "fix_output",
+            "output",
+            "detect_ai",
+            "ai_threshold",
+        ]
+    }
+}
+
+/// Return an INVALID_PARAMS JSON-RPC error if `args` contains keys not in
+/// the known parameter set. Returns `None` when all keys are recognized.
+fn reject_unknown_params(
+    args: &Value,
+    id: Option<super::types::RequestId>,
+) -> Option<JsonRpcResponse> {
+    let obj = args.as_object()?;
+    let known = zhtw_known_params();
+    let unexpected: Vec<&str> = obj
+        .keys()
+        .filter(|k| !known.contains(&k.as_str()))
+        .map(String::as_str)
+        .collect();
+    if unexpected.is_empty() {
+        return None;
+    }
+    Some(JsonRpcResponse::error_with_data(
+        id,
+        INVALID_PARAMS,
+        format!(
+            "unknown parameter{}: {}",
+            if unexpected.len() > 1 { "s" } else { "" },
+            unexpected.join(", "),
+        ),
+        json!({ "unexpected": unexpected }),
+    ))
 }
 
 /// Extract a required string field from a JSON object, returning a
