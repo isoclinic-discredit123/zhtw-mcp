@@ -1,14 +1,17 @@
 // Criterion benchmarks for zhtw-mcp scanning pipeline.
 //
 // Covers the benchmark targets:
-//   1. Scanner construction (Aho-Corasick automaton build)
-//   2. scan() on 1KB / 10KB / 100KB mixed CJK+ASCII text
-//   3. scan_profiled() with StrictMoe profile
-//   4. apply_fixes_with_context() with 50 concurrent fixes
-//   5. Markdown exclusion pass (build_markdown_excluded_ranges)
-//   6. FMM segmenter on 100-char text
+//   1. Scanner construction (Aho-Corasick automaton build, clone-free)
+//   2. Plain-text scan on 1KB / 10KB / 100KB mixed CJK+ASCII text
+//   3. scan_profiled with StrictMoe profile (plain text)
+//   4. Fix path: apply-only (50 issues) + end-to-end scan+fix on 10KB
+//   5. Context-clue-heavy scan (asserted >= 20% clue-gated issues)
+//   6. Markdown exclusion pass (build_markdown_excluded_ranges)
+//   7. FMM segmenter on 100-char text
+//   8. Post-scan transforms (ignore downgrade + remap)
+//   9. Per-stage CPU attribution on 100KB
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
 use zhtw_mcp::engine::markdown::build_markdown_excluded_ranges;
 use zhtw_mcp::engine::scan::Scanner;
@@ -74,14 +77,16 @@ const SEGMENTER_INPUT: &str = "\
 fn bench_scanner_construction(c: &mut Criterion) {
     let ruleset = load_embedded_ruleset().expect("load embedded ruleset");
 
+    // Use iter_batched so Vec::clone happens in setup, not the timed region.
     c.bench_function("scanner_construction", |b| {
-        b.iter(|| {
-            let scanner = Scanner::new(
-                black_box(ruleset.spelling_rules.clone()),
-                black_box(ruleset.case_rules.clone()),
-            );
-            black_box(&scanner);
-        });
+        b.iter_batched(
+            || (ruleset.spelling_rules.clone(), ruleset.case_rules.clone()),
+            |(spelling, case)| {
+                let scanner = Scanner::new(black_box(spelling), black_box(case));
+                black_box(&scanner);
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
@@ -139,7 +144,7 @@ fn bench_construction_breakdown(c: &mut Criterion) {
     group.finish();
 }
 
-// 2. scan() on 1KB / 10KB / 100KB
+// 2. scan() on 1KB / 10KB / 100KB (plain text, no Markdown exclusion overhead)
 
 fn bench_scan(c: &mut Criterion) {
     let ruleset = load_embedded_ruleset().expect("load embedded ruleset");
@@ -152,15 +157,17 @@ fn bench_scan(c: &mut Criterion) {
         let text = generate_text(size);
         group.bench_with_input(BenchmarkId::from_parameter(label), &text, |b, text| {
             b.iter(|| {
-                let issues = scanner.scan(black_box(text));
-                black_box(&issues);
+                // scan_profiled_md(..., false) uses ContentType::Plain,
+                // avoiding Markdown exclusion pass that scan() implicitly runs.
+                let output = scanner.scan_profiled_md(black_box(text), Profile::Default, false);
+                black_box(&output);
             });
         });
     }
     group.finish();
 }
 
-// 3. scan_profiled() with StrictMoe
+// 3. scan_profiled() with StrictMoe (plain text path)
 
 fn bench_scan_profiled_strict_moe(c: &mut Criterion) {
     let ruleset = load_embedded_ruleset().expect("load embedded ruleset");
@@ -173,15 +180,15 @@ fn bench_scan_profiled_strict_moe(c: &mut Criterion) {
         let text = generate_text(size);
         group.bench_with_input(BenchmarkId::from_parameter(label), &text, |b, text| {
             b.iter(|| {
-                let issues = scanner.scan_profiled(black_box(text), Profile::StrictMoe);
-                black_box(&issues);
+                let output = scanner.scan_profiled_md(black_box(text), Profile::StrictMoe, false);
+                black_box(&output);
             });
         });
     }
     group.finish();
 }
 
-// 4. apply_fixes_with_context() with 50 concurrent fixes
+// 4. Fix path benchmarks: apply-only and end-to-end scan+fix
 
 fn bench_apply_fixes(c: &mut Criterion) {
     let ruleset = load_embedded_ruleset().expect("load embedded ruleset");
@@ -191,7 +198,9 @@ fn bench_apply_fixes(c: &mut Criterion) {
     // Generate enough text to produce at least 50 issues.
     // The base paragraph has ~8 flaggable terms, so 10KB should yield plenty.
     let text = generate_text(10_240);
-    let mut issues = scanner.scan(&text).issues;
+    let mut issues = scanner
+        .scan_profiled_md(&text, Profile::Default, false)
+        .issues;
 
     // Cap at exactly 50 issues for a controlled benchmark.
     issues.truncate(50);
@@ -202,7 +211,10 @@ fn bench_apply_fixes(c: &mut Criterion) {
         "benchmark setup: scanner found no issues in generated text"
     );
 
-    c.bench_function("apply_fixes_50_issues", |b| {
+    let mut group = c.benchmark_group("fix_path");
+
+    // 4a. Apply-only: measures fixer in isolation with pre-computed issues.
+    group.bench_function("apply_fixes_50_issues", |b| {
         b.iter(|| {
             let result = apply_fixes_with_context(
                 black_box(&text),
@@ -214,9 +226,26 @@ fn bench_apply_fixes(c: &mut Criterion) {
             black_box(&result);
         });
     });
+
+    // 4b. End-to-end scan+fix on 10KB (the regression target from TODO 30.1).
+    group.bench_function("scan_and_fix_10kb", |b| {
+        b.iter(|| {
+            let output = scanner.scan_profiled_md(black_box(&text), Profile::Default, false);
+            let result = apply_fixes_with_context(
+                black_box(&text),
+                black_box(&output.issues),
+                FixMode::LexicalSafe,
+                &[],
+                Some(&segmenter),
+            );
+            black_box(&result);
+        });
+    });
+
+    group.finish();
 }
 
-// 4b. Context-clue-heavy scan
+// 5. Context-clue-heavy scan
 
 /// Text with terms that trigger context_clue rules (函數, 實現, 配置, etc.).
 /// This exercises the segmentation cache: many AC matches in close proximity
@@ -232,6 +261,25 @@ fn bench_scan_context_clues(c: &mut Criterion) {
     let ruleset = load_embedded_ruleset().expect("load embedded ruleset");
     let scanner = Scanner::new(ruleset.spelling_rules, ruleset.case_rules);
 
+    // Validate that the context-clue paragraph actually exercises clue resolution.
+    // At least 20% of issues on 10KB should have context_clues (the TODO target is ~30%).
+    {
+        let check_text =
+            CONTEXT_CLUE_PARAGRAPH.repeat((10_240 / CONTEXT_CLUE_PARAGRAPH.len()).max(1));
+        let output = scanner.scan_profiled_md(&check_text, Profile::Default, false);
+        let total = output.issues.len();
+        let with_clues = output
+            .issues
+            .iter()
+            .filter(|i| i.context_clues.is_some())
+            .count();
+        assert!(
+            total > 0 && with_clues * 100 / total >= 20,
+            "benchmark setup: context-clue paragraph must produce >= 20% clue-gated issues, \
+             got {with_clues}/{total}"
+        );
+    }
+
     let sizes: &[(usize, &str)] = &[(1_024, "1KB"), (10_240, "10KB"), (102_400, "100KB")];
 
     let mut group = c.benchmark_group("scan_context_clues");
@@ -243,7 +291,7 @@ fn bench_scan_context_clues(c: &mut Criterion) {
         }
         group.bench_with_input(BenchmarkId::from_parameter(label), &text, |b, text| {
             b.iter(|| {
-                let output = scanner.scan(black_box(text));
+                let output = scanner.scan_profiled_md(black_box(text), Profile::Default, false);
                 black_box(&output);
             });
         });
@@ -391,8 +439,10 @@ fn bench_post_scan_transforms(c: &mut Criterion) {
 //
 // Measures each scan stage in isolation to determine where time is spent.
 // Uses ProfileConfig flags to enable/disable individual stages.
-// The difference between "full scan" and "all-off" gives the baseline overhead
-// (detect_chinese_type + line index + sorting).
+// Note: baseline_no_checks (all-off) early-returns on zero issues, so it
+// excludes LineIndex construction.  LineIndex cost is benchmarked separately
+// in lineindex_100kb and is hidden inside stages that produce issues
+// (e.g. spelling_only).
 
 fn bench_cpu_attribution_100kb(c: &mut Criterion) {
     use zhtw_mcp::engine::scan::ContentType;
@@ -408,7 +458,7 @@ fn bench_cpu_attribution_100kb(c: &mut Criterion) {
         zhtw_mcp::engine::scan::build_exclusions_for_content_type(&text, ContentType::Plain);
 
     // All-off config: measures baseline overhead (detect_chinese_type +
-    // vec alloc + sort + line index).
+    // vec alloc + sort).  LineIndex is skipped (early-return on 0 issues).
     let cfg_none = ProfileConfig {
         spelling: false,
         casing: false,
