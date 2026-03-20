@@ -275,13 +275,25 @@ impl Server {
         };
 
         if params.name == "zhtw" {
+            if !params.arguments.is_object() {
+                let actual = json_type_name(&params.arguments);
+                return JsonRpcResponse::error_with_data(
+                    req.id.clone(),
+                    INVALID_PARAMS,
+                    format!("arguments must be an object, got {actual}"),
+                    json!({ "field": "arguments", "expected_type": "object", "actual_type": actual }),
+                );
+            }
             if let Some(resp) = reject_unknown_params(&params.arguments, req.id.clone()) {
                 return resp;
             }
         }
 
         let result = match params.name.as_str() {
-            "zhtw" => self.tool_check(&params.arguments, bridge),
+            "zhtw" => match self.tool_check(&params.arguments, bridge, req.id.clone()) {
+                Ok(r) => r,
+                Err(resp) => return resp,
+            },
             _ => CallToolResult::error(format!("unknown tool: {}", params.name)),
         };
 
@@ -294,21 +306,21 @@ impl Server {
     /// this trigger a structured error before any processing begins.
     const MAX_TEXT_BYTES: usize = 256 * 1024;
 
+    #[allow(clippy::result_large_err)]
     fn tool_check(
         &self,
         args: &Value,
         mut bridge: Option<&mut SamplingBridge<'_>>,
-    ) -> CallToolResult {
-        let text = match require_str(args, "text") {
-            Ok(t) => t,
-            Err(r) => return r,
-        };
+        id: Option<super::types::RequestId>,
+    ) -> Result<CallToolResult, JsonRpcResponse> {
+        let text = require_str_validated(args, "text", &id)?;
 
         if text.len() > Self::MAX_TEXT_BYTES {
-            return CallToolResult::error(format!(
-                "text too large: {} bytes exceeds limit of {} bytes (256 KiB)",
-                text.len(),
-                Self::MAX_TEXT_BYTES,
+            return Err(param_error(
+                &id,
+                "text",
+                &format!("{} bytes", text.len()),
+                &[&format!("<= {} bytes (256 KiB)", Self::MAX_TEXT_BYTES)],
             ));
         }
 
@@ -321,22 +333,10 @@ impl Server {
         };
         let text = s2t_converted.as_deref().unwrap_or(text);
 
-        let fix_mode = match parse_fix_mode(args) {
-            Ok(m) => m,
-            Err(r) => return r,
-        };
-        let profile = match parse_profile(args) {
-            Ok(p) => p,
-            Err(r) => return r,
-        };
-        let content_type = match parse_content_type(args) {
-            Ok(ct) => ct,
-            Err(r) => return r,
-        };
-        let stance = match parse_political_stance(args) {
-            Ok(s) => s,
-            Err(r) => return r,
-        };
+        let fix_mode = parse_fix_mode(args, &id)?;
+        let profile = parse_profile(args, &id)?;
+        let content_type = parse_content_type(args, &id)?;
+        let stance = parse_political_stance(args, &id)?;
         let max_errors = args.get("max_errors").and_then(|v| v.as_u64());
         let max_warnings = args.get("max_warnings").and_then(|v| v.as_u64());
         let ignore_terms = parse_ignore_terms(args);
@@ -344,14 +344,8 @@ impl Server {
             ignore_terms.iter().map(String::as_str).collect();
         let explain = parse_explain(args);
         let output_mode =
-            match parse_output_mode(args, default_output_mode(self.client_name.as_deref())) {
-                Ok(m) => m,
-                Err(r) => return r,
-            };
-        let fix_output = match parse_fix_output(args) {
-            Ok(m) => m,
-            Err(r) => return r,
-        };
+            parse_output_mode(args, default_output_mode(self.client_name.as_deref()), &id)?;
+        let fix_output = parse_fix_output(args, &id)?;
         #[cfg(feature = "translate")]
         let verify = parse_verify(args);
 
@@ -360,7 +354,7 @@ impl Server {
             .get("detect_ai")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let ai_threshold = args.get("ai_threshold").and_then(|v| v.as_str());
+        let ai_threshold = optional_str_validated(args, "ai_threshold", &id)?;
 
         // Build effective config: profile base + stance override + detect_ai override.
         let mut cfg = profile.config();
@@ -378,14 +372,17 @@ impl Server {
                 Some("medium") | None => 1.0,
                 Some("high") => 1.5,
                 Some(other) => {
-                    return CallToolResult::error(format!(
-                        "invalid ai_threshold: '{other}'. Expected: low, medium, high"
+                    return Err(param_error(
+                        &id,
+                        "ai_threshold",
+                        other,
+                        &["low", "medium", "high"],
                     ));
                 }
             };
         }
 
-        match fix_mode {
+        Ok(match fix_mode {
             FixMode::None => {
                 // Lint-only path.
                 let output =
@@ -611,7 +608,7 @@ impl Server {
                     sampling_stats,
                 })
             }
-        }
+        })
     }
 
     /// Downgrade suppressed issues to Info severity.
@@ -810,65 +807,169 @@ fn reject_unknown_params(
     ))
 }
 
+/// Build a structured INVALID_PARAMS JSON-RPC error for a bad tool parameter.
+/// The `data` field carries `{"field", "value", "accepted"}` so clients can
+/// render actionable diagnostics without parsing the message string.
+fn param_error(
+    id: &Option<super::types::RequestId>,
+    field: &str,
+    value: &str,
+    accepted: &[&str],
+) -> JsonRpcResponse {
+    JsonRpcResponse::error_with_data(
+        id.clone(),
+        INVALID_PARAMS,
+        format!("invalid '{field}': '{value}'"),
+        json!({ "field": field, "value": value, "accepted": accepted }),
+    )
+}
+
 /// Extract a required string field from a JSON object, returning a
-/// CallToolResult::error on failure so callers can return Err(r).
-fn require_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, CallToolResult> {
-    args.get(field)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| CallToolResult::error(format!("missing '{field}' parameter")))
+/// structured INVALID_PARAMS error on failure. Distinguishes missing
+/// field from present-but-wrong-type so clients get actionable diagnostics.
+#[allow(clippy::result_large_err)]
+fn require_str_validated<'a>(
+    args: &'a Value,
+    field: &str,
+    id: &Option<super::types::RequestId>,
+) -> Result<&'a str, JsonRpcResponse> {
+    match args.get(field) {
+        None => Err(JsonRpcResponse::error_with_data(
+            id.clone(),
+            INVALID_PARAMS,
+            format!("missing required parameter '{field}'"),
+            json!({ "field": field }),
+        )),
+        Some(v) => v.as_str().ok_or_else(|| {
+            let type_name = json_type_name(v);
+            JsonRpcResponse::error_with_data(
+                id.clone(),
+                INVALID_PARAMS,
+                format!("'{field}' must be a string, got {type_name}"),
+                json!({ "field": field, "expected_type": "string", "actual_type": type_name }),
+            )
+        }),
+    }
+}
+
+/// Extract an optional string field, returning INVALID_PARAMS if the
+/// value is present but not a string. Returns `Ok(None)` when absent.
+#[allow(clippy::result_large_err)]
+fn optional_str_validated<'a>(
+    args: &'a Value,
+    field: &str,
+    id: &Option<super::types::RequestId>,
+) -> Result<Option<&'a str>, JsonRpcResponse> {
+    match args.get(field) {
+        None => Ok(None),
+        Some(v) => match v.as_str() {
+            Some(s) => Ok(Some(s)),
+            None => {
+                let type_name = json_type_name(v);
+                Err(JsonRpcResponse::error_with_data(
+                    id.clone(),
+                    INVALID_PARAMS,
+                    format!("'{field}' must be a string, got {type_name}"),
+                    json!({ "field": field, "expected_type": "string", "actual_type": type_name }),
+                ))
+            }
+        },
+    }
+}
+
+/// Human-readable JSON type name for error diagnostics.
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Number(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+        Value::Null => "null",
+        Value::String(_) => "string",
+    }
 }
 
 /// Parse the optional "fix_mode" field from tool arguments.
-/// Returns an error for unrecognized values instead of silently defaulting.
-fn parse_fix_mode(args: &Value) -> Result<FixMode, CallToolResult> {
-    match args.get("fix_mode").and_then(|v| v.as_str()) {
+/// Returns an INVALID_PARAMS error for unrecognized values.
+#[allow(clippy::result_large_err)]
+fn parse_fix_mode(
+    args: &Value,
+    id: &Option<super::types::RequestId>,
+) -> Result<FixMode, JsonRpcResponse> {
+    match optional_str_validated(args, "fix_mode", id)? {
         Some("orthographic") => Ok(FixMode::Orthographic),
         Some("lexical_safe") => Ok(FixMode::LexicalSafe),
         Some("lexical_contextual") => Ok(FixMode::LexicalContextual),
         None | Some("none") => Ok(FixMode::None),
-        Some(other) => Err(CallToolResult::error(format!(
-            "invalid 'fix_mode': '{other}' (expected 'none', 'orthographic', 'lexical_safe', or 'lexical_contextual')"
-        ))),
+        Some(other) => Err(param_error(
+            id,
+            "fix_mode",
+            other,
+            &["none", "orthographic", "lexical_safe", "lexical_contextual"],
+        )),
     }
 }
 
 /// Parse the optional "content_type" field from tool arguments.
-/// Returns an error for unrecognized values instead of silently defaulting.
-fn parse_content_type(args: &Value) -> Result<ContentType, CallToolResult> {
-    match args.get("content_type").and_then(|v| v.as_str()) {
+/// Returns an INVALID_PARAMS error for unrecognized values.
+#[allow(clippy::result_large_err)]
+fn parse_content_type(
+    args: &Value,
+    id: &Option<super::types::RequestId>,
+) -> Result<ContentType, JsonRpcResponse> {
+    match optional_str_validated(args, "content_type", id)? {
         Some("markdown") => Ok(ContentType::Markdown),
         Some("markdown-scan-code") => Ok(ContentType::MarkdownScanCode),
         Some("yaml") => Ok(ContentType::Yaml),
         Some("plain") | None => Ok(ContentType::Plain),
-        Some(other) => Err(CallToolResult::error(format!(
-            "invalid 'content_type': '{other}' (expected 'plain', 'markdown', 'markdown-scan-code', or 'yaml')"
-        ))),
+        Some(other) => Err(param_error(
+            id,
+            "content_type",
+            other,
+            &["plain", "markdown", "markdown-scan-code", "yaml"],
+        )),
     }
 }
 
 /// Parse the optional "profile" field from tool arguments.
-/// Returns an error for unrecognized values instead of silently defaulting.
-fn parse_profile(args: &Value) -> Result<Profile, CallToolResult> {
-    match args.get("profile").and_then(|v| v.as_str()) {
+/// Returns an INVALID_PARAMS error for unrecognized values.
+#[allow(clippy::result_large_err)]
+fn parse_profile(
+    args: &Value,
+    id: &Option<super::types::RequestId>,
+) -> Result<Profile, JsonRpcResponse> {
+    match optional_str_validated(args, "profile", id)? {
         None => Ok(Profile::Default),
         Some(s) => Profile::from_str_strict(s).ok_or_else(|| {
-            CallToolResult::error(format!(
-                "invalid 'profile': '{s}' (expected 'default', 'strict_moe', 'ui_strings', or 'editorial')"
-            ))
+            param_error(
+                id,
+                "profile",
+                s,
+                &["default", "strict_moe", "ui_strings", "editorial"],
+            )
         }),
     }
 }
 
 /// Parse the optional "political_stance" field from tool arguments.
-/// Returns an error for unrecognized values instead of silently defaulting.
-fn parse_political_stance(args: &Value) -> Result<Option<PoliticalStance>, CallToolResult> {
-    match args.get("political_stance").and_then(|v| v.as_str()) {
+/// Returns an INVALID_PARAMS error for unrecognized values.
+#[allow(clippy::result_large_err)]
+fn parse_political_stance(
+    args: &Value,
+    id: &Option<super::types::RequestId>,
+) -> Result<Option<PoliticalStance>, JsonRpcResponse> {
+    match optional_str_validated(args, "political_stance", id)? {
         None => Ok(None),
-        Some(s) => PoliticalStance::from_str_strict(s).map(Some).ok_or_else(|| {
-            CallToolResult::error(format!(
-                "invalid 'political_stance': '{s}' (expected 'roc_centric', 'international', or 'neutral')"
-            ))
-        }),
+        Some(s) => PoliticalStance::from_str_strict(s)
+            .map(Some)
+            .ok_or_else(|| {
+                param_error(
+                    id,
+                    "political_stance",
+                    s,
+                    &["roc_centric", "international", "neutral"],
+                )
+            }),
     }
 }
 
@@ -894,14 +995,21 @@ impl FixOutputMode {
 }
 
 /// Parse the optional "fix_output" parameter from tool arguments.
-fn parse_fix_output(args: &Value) -> Result<FixOutputMode, CallToolResult> {
-    match args.get("fix_output").and_then(|v| v.as_str()) {
+#[allow(clippy::result_large_err)]
+fn parse_fix_output(
+    args: &Value,
+    id: &Option<super::types::RequestId>,
+) -> Result<FixOutputMode, JsonRpcResponse> {
+    match optional_str_validated(args, "fix_output", id)? {
         Some("full") | None => Ok(FixOutputMode::Full),
         Some("search_replace") => Ok(FixOutputMode::SearchReplace),
         Some("patch") => Ok(FixOutputMode::Patch),
-        Some(other) => Err(CallToolResult::error(format!(
-            "invalid 'fix_output': '{other}' (expected 'full', 'search_replace', or 'patch')"
-        ))),
+        Some(other) => Err(param_error(
+            id,
+            "fix_output",
+            other,
+            &["full", "search_replace", "patch"],
+        )),
     }
 }
 
@@ -930,16 +1038,24 @@ enum OutputMode {
 /// Parse the optional "output" mode from tool arguments.
 /// When no explicit value is given, uses the provided default (which may
 /// be auto-detected from the client identity).
-fn parse_output_mode(args: &Value, default: OutputMode) -> Result<OutputMode, CallToolResult> {
-    match args.get("output").and_then(|v| v.as_str()) {
+#[allow(clippy::result_large_err)]
+fn parse_output_mode(
+    args: &Value,
+    default: OutputMode,
+    id: &Option<super::types::RequestId>,
+) -> Result<OutputMode, JsonRpcResponse> {
+    match optional_str_validated(args, "output", id)? {
         Some("compact") => Ok(OutputMode::Compact),
         Some("full") => Ok(OutputMode::Full),
         Some("tabular") => Ok(OutputMode::Tabular),
         Some("summary") => Ok(OutputMode::Summary),
         None => Ok(default),
-        Some(other) => Err(CallToolResult::error(format!(
-            "invalid 'output': '{other}' (expected 'full', 'compact', 'tabular', or 'summary')"
-        ))),
+        Some(other) => Err(param_error(
+            id,
+            "output",
+            other,
+            &["full", "compact", "tabular", "summary"],
+        )),
     }
 }
 

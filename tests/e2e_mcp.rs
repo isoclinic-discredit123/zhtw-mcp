@@ -484,7 +484,7 @@ fn e2e_initialize_and_tools_list() {
         "exactly 256 KiB should be accepted"
     );
 
-    // 256 KiB + 1 byte should be rejected.
+    // 256 KiB + 1 byte should be rejected with INVALID_PARAMS and structured data.
     let over_text = "a".repeat(256 * 1024 + 1);
     let resp = send_recv(
         &mut stdin,
@@ -502,12 +502,12 @@ fn e2e_initialize_and_tools_list() {
         }),
     );
     assert_eq!(resp["id"], 25);
-    let content = &resp["result"]["content"][0];
-    let error_text = content["text"].as_str().unwrap();
-    assert!(
-        error_text.contains("text too large"),
-        "256 KiB + 1 should be rejected"
-    );
+    let err = resp
+        .get("error")
+        .expect("expected JSON-RPC error for oversized text");
+    assert_eq!(err["code"].as_i64().unwrap(), -32602);
+    let data = err.get("data").expect("expected structured data");
+    assert_eq!(data["field"], "text", "data.field should be 'text'");
 
     // -- E2E: invalid arguments (missing text field) --
 
@@ -525,14 +525,14 @@ fn e2e_initialize_and_tools_list() {
         }),
     );
     assert_eq!(resp["id"], 26);
-    let content = &resp["result"]["content"][0];
-    let error_text = content["text"].as_str().unwrap();
-    assert!(
-        error_text.contains("missing") && error_text.contains("text"),
-        "missing text field should return error"
-    );
+    let err = resp
+        .get("error")
+        .expect("expected JSON-RPC error for missing text");
+    assert_eq!(err["code"].as_i64().unwrap(), -32602);
+    let data = err.get("data").expect("expected structured data");
+    assert_eq!(data["field"], "text", "data.field should be 'text'");
 
-    // -- E2E: invalid content_type rejected --
+    // -- E2E: invalid content_type rejected with structured data --
 
     let resp = send_recv(
         &mut stdin,
@@ -551,12 +551,19 @@ fn e2e_initialize_and_tools_list() {
         }),
     );
     assert_eq!(resp["id"], 27);
-    let result = &resp["result"];
-    assert_eq!(result["isError"], true);
-    let error_text = result["content"][0]["text"].as_str().unwrap();
+    let err = resp
+        .get("error")
+        .expect("expected JSON-RPC error for invalid content_type");
+    assert_eq!(err["code"].as_i64().unwrap(), -32602);
+    let data = err.get("data").expect("expected structured data");
+    assert_eq!(data["field"], "content_type");
+    assert_eq!(data["value"], "html");
+    let accepted = data["accepted"]
+        .as_array()
+        .expect("accepted should be array");
     assert!(
-        error_text.contains("invalid") && error_text.contains("content_type"),
-        "unknown content_type should be rejected: {error_text}"
+        accepted.iter().any(|v| v == "plain"),
+        "accepted should include 'plain'"
     );
 
     // -- E2E: output: "compact" — deduplicated issues, no text/trace fields --
@@ -1513,6 +1520,58 @@ fn e2e_all_known_params_accepted() {
         "expected success but got error: {resp}"
     );
     assert!(resp.get("result").is_some(), "expected result field");
+
+    drop(stdin);
+    let _ = child.wait();
+}
+
+// -- Structured error data for invalid parameter values (25.4) --
+
+#[test]
+fn e2e_invalid_profile_structured_error_data() {
+    let (mut stdin, mut stdout, mut child, _tmp) = spawn_initialized_child();
+
+    let resp = send_recv(
+        &mut stdin,
+        &mut stdout,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "id": 910,
+            "params": {
+                "name": "zhtw",
+                "arguments": {
+                    "text": "測試",
+                    "profile": "nonexistent"
+                }
+            }
+        }),
+    );
+
+    // Must be INVALID_PARAMS (-32602) at JSON-RPC level, not a tool-level error.
+    let err = resp.get("error").expect("expected JSON-RPC error");
+    assert_eq!(err["code"].as_i64().unwrap(), -32602);
+
+    // Structured data must identify the field, rejected value, and accepted values.
+    let data = err.get("data").expect("expected structured data field");
+    assert_eq!(data["field"], "profile");
+    assert_eq!(data["value"], "nonexistent");
+    let accepted = data["accepted"]
+        .as_array()
+        .expect("accepted should be an array");
+    let accepted_strs: Vec<&str> = accepted.iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(
+        accepted_strs.contains(&"default"),
+        "accepted should include 'default': {accepted_strs:?}"
+    );
+    assert!(
+        accepted_strs.contains(&"strict_moe"),
+        "accepted should include 'strict_moe': {accepted_strs:?}"
+    );
+    assert!(
+        accepted_strs.contains(&"editorial"),
+        "accepted should include 'editorial': {accepted_strs:?}"
+    );
 
     drop(stdin);
     let _ = child.wait();
